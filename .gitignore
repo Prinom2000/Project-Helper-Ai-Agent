@@ -1,0 +1,6 @@
+# .gitignore file (place it in the root directory)
+.env
+*.pyc
+__pycache__/
+node_modules/
+dist/
