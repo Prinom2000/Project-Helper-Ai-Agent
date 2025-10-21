@@ -1,7 +1,7 @@
 # api/v1/endpoints/project_task_question.py
 import openai
 import asyncio
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from app.schemas.project import Answer
 from app.services.openai_service import generate_text
 from app.utils.task_utils import extract_tasks
@@ -10,6 +10,8 @@ import httpx
 from dotenv import load_dotenv
 load_dotenv()
 from typing import Tuple, Optional
+from pydantic import BaseModel, Field
+from fastapi import Body
 import logging
 logging.basicConfig(level=logging.INFO)
 
@@ -207,3 +209,35 @@ async def generate_text_with_context(context: str):
         return response['choices'][0]['message']['content'].strip()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating response: {str(e)}")
+
+class TitleRequest(BaseModel):
+    # Python attribute has no trailing space, but incoming JSON key can be "user_text "
+    user_text: str = Field(..., alias="user_text ")
+    class Config:
+        allow_population_by_field_name = True
+        extra = "forbid"
+
+@router.post("/generate_title/")
+async def generate_title(payload: TitleRequest = Body(...)):
+    """
+    Accepts JSON like:
+    { "user_text ": "your long project idea or short title" }
+    Returns a short, single-line project title (max 6 words).
+    """
+    text = (payload.user_text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="No project idea text provided")
+
+    prompt = (
+        "Summarize the following project title/idea into a short, clear project title (max 6 words). "
+        "Return only the title on a single line with no additional explanation.\n\n"
+        f"{text}"
+    )
+
+    title = (await generate_text(prompt)) or ""
+    title = title.strip().splitlines()[0].strip(' "\'')
+    parts = title.split()
+    if len(parts) > 6:
+        title = " ".join(parts[:6])
+
+    return {"title": title}
