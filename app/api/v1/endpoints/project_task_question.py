@@ -9,7 +9,7 @@ import os
 import httpx
 from dotenv import load_dotenv
 load_dotenv()
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from fastapi import Body
 import logging
@@ -924,3 +924,762 @@ def _parse_possible_json_string(s: str) -> Optional[dict]:
     if kv:
         return kv
     return None
+
+class TaskEditRequest(BaseModel):
+    task_id: str
+    prompt: str
+    project_id: str  # needed to locate the task
+
+
+
+############################################################
+async def _fetch_task_by_id(project_id: str, task_id: str) -> Tuple[Optional[dict], bool]:
+    """
+    Fetch a single task by project_id and task_id.
+    Returns (task_dict, success) where task_dict contains: task, details, datetime, subtasks
+    
+    The function tries:
+    1. Fetch from external service using getSingletask endpoint
+    2. Fall back to in-memory storage if project_id is numeric
+    3. Fall back to fetching full project and extracting the task
+    """
+    
+    # Try fetching from external service first
+    base = os.getenv("PROJECT_SERVICE_URL")
+    if base:
+        # Try the getSingletask endpoint
+        get_task_path = f"{base.rstrip('/')}/api/v1/project/getSingletask/{project_id}/{task_id}/"
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(get_task_path, timeout=10.0)
+            
+            if resp.status_code == 200:
+                payload = resp.json()
+                # Handle different response structures
+                task_data = payload.get("data") if isinstance(payload, dict) and payload.get("data") else payload
+                
+                # If task_data is the task itself
+                if isinstance(task_data, dict) and "task" in task_data:
+                    return task_data, True
+                
+                # If task_data contains a task field
+                if isinstance(task_data, dict) and task_data.get("task"):
+                    return task_data.get("task"), True
+                    
+        except Exception as e:
+            logging.warning(f"Failed to fetch task from external service: {e}")
+    
+    # Fallback 1: Check in-memory storage if project_id is numeric
+    if project_id.isdigit():
+        idx = int(project_id)
+        if idx in projects:
+            project = projects[idx]
+            tasks = project.get("tasks", [])
+            
+            # Try to find task by task_id (could be index or ID)
+            if task_id.isdigit():
+                task_idx = int(task_id)
+                if 0 <= task_idx < len(tasks):
+                    task = tasks[task_idx]
+                    if isinstance(task, dict):
+                        return task, True
+                    return {"task": str(task), "details": "", "datetime": "", "subtasks": []}, True
+            
+            # Try to find task by matching ID field
+            for task in tasks:
+                if isinstance(task, dict):
+                    if task.get("id") == task_id or task.get("_id") == task_id:
+                        return task, True
+    
+    # Fallback 2: Fetch full project and extract the task
+    try:
+        project, external_fetched, numeric_idx = await _fetch_project_by_id(project_id)
+        
+        if project:
+            tasks = project.get("tasks", [])
+            
+            # Try to find by index
+            if task_id.isdigit():
+                task_idx = int(task_id)
+                if 0 <= task_idx < len(tasks):
+                    task = tasks[task_idx]
+                    if isinstance(task, dict):
+                        return task, True
+                    return {"task": str(task), "details": "", "datetime": "", "subtasks": []}, True
+            
+            # Try to find by ID field
+            for task in tasks:
+                if isinstance(task, dict):
+                    if task.get("id") == task_id or task.get("_id") == task_id:
+                        return task, True
+    
+    except Exception as e:
+        logging.error(f"Failed to fetch project for task lookup: {e}")
+    
+    # Task not found
+    return None, False
+
+############################################################ to get a single task by id or index
+@router.get("/task/{project_id}/{task_id}")
+async def get_task(project_id: str, task_id: str):
+    """
+    Get details of a specific task by project_id and task_id using backend's getSingletask API.
+    The task_id can be either the task's unique ID or its index in the tasks array.
+    """
+    task, success = await _fetch_task_by_id(project_id, task_id)
+    
+    if not success or not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    # Ensure datetime is valid and after now
+    task["datetime"] = _ensure_datetime_after_now_iso(task.get("datetime", ""))
+    
+    # Ensure all subtask datetimes are valid
+    for subtask in task.get("subtasks", []):
+        if isinstance(subtask, dict):
+            subtask["datetime"] = _ensure_datetime_after_now_iso(subtask.get("datetime", ""))
+    
+    return {
+        "success": True,
+        "task": task,
+        "project_id": project_id
+    }
+
+############################################################ for edit task
+class TaskEditPromptRequest(BaseModel):
+    prompt: str
+    project_id: str  # needed to persist changes back
+
+# Also update the edit endpoint to log the response
+@router.patch("/task/{task_id}/edit")
+async def edit_task(task_id: str, request: TaskEditPromptRequest):
+    """
+    Edit a task based on natural language prompt.
+    
+    Supported operations:
+    - Edit task name: "change task name to 'Buy groceries'"
+    - Edit task details: "update details to 'purchase items from store'"
+    - Edit task datetime: "change deadline to 3 days from now" or "set date to 2025-11-15"
+    - Add subtask: "add subtask 'call supplier'"
+    - Edit subtask: "change first subtask name to 'email supplier'"
+    - Replace subtask: "replace second subtask with 'review documents'"
+    - Remove subtask: "remove last subtask" or "delete subtask 'old task'"
+    - Edit subtask details: "update first subtask details to 'contact via phone'"
+    - Edit subtask datetime: "change second subtask deadline to tomorrow"
+    
+    Request body:
+    {
+        "prompt": "change task name to 'Complete report' and add subtask 'gather data'",
+        "project_id": "abc123"
+    }
+    
+    Returns: Updated task object
+    """
+    project_id = request.project_id
+    prompt = request.prompt.strip()
+    
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt cannot be empty")
+    
+    # Fetch the task
+    task, found_project_id = await _find_task_across_projects(task_id, project_id)
+    
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task with ID '{task_id}' not found")
+    
+    logging.info(f"=== EDIT TASK START ===")
+    logging.info(f"Task ID: {task_id}, Project ID: {project_id}")
+    logging.info(f"Original task: {json.dumps(task, indent=2)}")
+    logging.info(f"Prompt: {prompt}")
+    
+    actual_project_id = project_id if project_id else found_project_id
+    
+    if not actual_project_id:
+        raise HTTPException(status_code=400, detail="Could not determine project_id for this task")
+    
+    # Parse and apply edits
+    try:
+        edited_task = await _parse_and_apply_task_edits(task, prompt)
+        logging.info(f"Edited task: {json.dumps(edited_task, indent=2)}")
+    except Exception as e:
+        logging.error(f"Error parsing prompt: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to parse edit instructions: {str(e)}")
+    
+    # Ensure all datetimes are valid and after now
+    edited_task["datetime"] = _ensure_datetime_after_now_iso(edited_task.get("datetime", ""))
+
+    for subtask in edited_task.get("subtasks", []):
+        if isinstance(subtask, dict):
+            subtask["datetime"] = _ensure_datetime_after_now_iso(subtask.get("datetime", ""))
+    
+    # Ensure subtask datetimes are before task datetime
+    _ensure_subtasks_before_task_datetimes([edited_task])
+    
+    logging.info(f"Final task after datetime adjustments: {json.dumps(edited_task, indent=2)}")
+    
+    # Persist changes
+    success = await _update_task_in_project(actual_project_id, task_id, edited_task)
+    
+    logging.info(f"Persistence success: {success}")
+    logging.info(f"=== EDIT TASK END ===")
+    
+    if not success:
+        logging.warning(f"Failed to persist task changes to project {actual_project_id}")
+        # Prepare response data
+        response_task = _prepare_task_response(edited_task)
+        
+        return {
+            "success": False,
+            "statusCode": 500,
+            "message": "Task updated locally but failed to persist to backend",
+            "data": response_task
+        }
+    
+    # Prepare clean response data
+    response_task = _prepare_task_response(edited_task)
+    
+    return {
+        "success": True,
+        "statusCode": 200,
+        "message": "Task successfully updated",
+        "data": response_task
+    }
+
+
+def _prepare_task_response(task: dict) -> dict:
+    """
+    Prepare task data for response by cleaning up internal fields and ensuring correct structure.
+    Removes extra 'datetime' fields from subtasks while keeping original fields.
+    """
+    response_task = {
+        "task": task.get("task", ""),
+        "details": task.get("details", ""),
+        "taskDueDate": task.get("datetime", task.get("taskDueDate", "")),
+        "isDeleted": task.get("isDeleted", False),
+        "isComplite": task.get("isComplite", False),
+        "isStar": task.get("isStar", False),
+        "_id": task.get("_id", "")
+    }
+    
+    # Clean up subtasks - remove the extra 'datetime' field we added
+    subtasks = []
+    for subtask in task.get("subtasks", []):
+        if isinstance(subtask, dict):
+            clean_subtask = {
+                "title": subtask.get("subtask", subtask.get("title", "")),
+                "subTaskDueDate": subtask.get("subTaskDueDate", subtask.get("datetime", "")),
+                "isStar": subtask.get("isStar", False),
+                "isDeleted": subtask.get("isDeleted", False),
+                "isComplite": subtask.get("isComplite", False),
+                "_id": subtask.get("_id", "")
+            }
+            subtasks.append(clean_subtask)
+    
+    response_task["subtasks"] = subtasks
+    
+    return response_task
+
+
+
+async def _find_task_across_projects(task_id: str, hint_project_id: Optional[str] = None) -> Tuple[Optional[dict], Optional[str]]:
+    """
+    Find a task by task_id, optionally using hint_project_id as a starting point.
+    Returns (task_dict, project_id) or (None, None) if not found.
+    """
+    # First try with hint_project_id if provided
+    if hint_project_id:
+        try:
+            task, success = await _fetch_task_by_id(hint_project_id, task_id)
+            if success and task:
+                return task, hint_project_id
+        except Exception as e:
+            logging.warning(f"Failed to fetch task from hint project {hint_project_id}: {e}")
+    
+    # Try in-memory projects
+    for proj_id, project in projects.items():
+        tasks = project.get("tasks", [])
+        
+        # Search by index
+        if task_id.isdigit():
+            idx = int(task_id)
+            if 0 <= idx < len(tasks):
+                task = tasks[idx]
+                if isinstance(task, dict):
+                    return task, str(proj_id)
+                return {"task": str(task), "details": "", "datetime": "", "subtasks": []}, str(proj_id)
+        
+        # Search by ID field
+        for task in tasks:
+            if isinstance(task, dict):
+                if task.get("id") == task_id or task.get("_id") == task_id:
+                    return task, str(proj_id)
+    
+    return None, None
+
+async def _parse_and_apply_task_edits(task: dict, prompt: str) -> dict:
+    """
+    Parse natural language prompt and apply edits to the task.
+    Returns the edited task dictionary.
+    """
+    prompt_lower = prompt.lower().strip()
+    
+    # Log the original task for debugging
+    logging.info(f"Original task datetime: {task.get('datetime')}")
+    logging.info(f"Edit prompt: {prompt}")
+    
+    # Use LLM to parse the edit instructions
+    parse_prompt = f"""
+You are a task editing assistant. Given a task and edit instructions, return a JSON object with the edits to apply.
+
+Current task:
+{json.dumps(task, indent=2)}
+
+User edit instructions: "{prompt}"
+
+CRITICAL: When the user says "extend the datetime X days from now" or similar, they mean to ADD X days to the CURRENT task datetime.
+
+Return a JSON object with these optional fields (only include fields that should be changed):
+- task_name: new task name (string)
+- details: new task details (string)  
+- datetime_instruction: natural language datetime instruction
+- add_subtasks: array of subtasks to add, each with {{subtask, details, datetime_instruction}}
+- edit_subtasks: array of edits, each with {{index_or_name, field, new_value}} where field is "subtask", "details", or "datetime_instruction"
+- remove_subtasks: array of subtask indices or names to remove
+- replace_subtasks: array with {{index_or_name, subtask, details, datetime_instruction}}
+
+For datetime_instruction, use these formats:
+- If extending/postponing from current: "extend 3 days" or "add 5 days"
+- If setting absolute date: "2025-11-15" or "tomorrow" or "5 days from now"
+
+Examples:
+
+Input: "extend the datetime 3 days from now"
+Output: {{"datetime_instruction": "extend 3 days"}}
+
+Input: "extend deadline by 5 days"  
+Output: {{"datetime_instruction": "extend 5 days"}}
+
+Input: "postpone by 1 week"
+Output: {{"datetime_instruction": "extend 7 days"}}
+
+Input: "set deadline to 2025-11-15"
+Output: {{"datetime_instruction": "2025-11-15"}}
+
+Return ONLY the JSON object, no other text.
+"""
+    
+    try:
+        response = await generate_text_with_context(parse_prompt)
+        cleaned = re.sub(r'```(?:json)?\s*', '', response, flags=re.IGNORECASE).replace('```', '').strip()
+        
+        # Extract JSON
+        match = re.search(r'\{.*\}', cleaned, flags=re.DOTALL)
+        if match:
+            edits = json.loads(match.group(0))
+            logging.info(f"LLM parsed edits: {edits}")
+        else:
+            edits = {}
+            logging.warning("No JSON found in LLM response")
+    except Exception as e:
+        logging.error(f"LLM parsing failed: {e}")
+        # Fallback to simple regex parsing
+        edits = _fallback_parse_edit_prompt(prompt, task)
+        logging.info(f"Fallback parsed edits: {edits}")
+    
+    # Apply edits to task
+    edited_task = task.copy()
+    edited_task.setdefault("subtasks", [])
+    
+    # Edit task name
+    if edits.get("task_name"):
+        edited_task["task"] = edits["task_name"]
+    
+    # Edit task details
+    if edits.get("details"):
+        edited_task["details"] = edits["details"]
+    
+    # Edit task datetime - CRITICAL FIX
+    if edits.get("datetime_instruction"):
+        instruction = edits["datetime_instruction"].lower().strip()
+        logging.info(f"Processing datetime instruction: {instruction}")
+        
+        # Get current task datetime
+        current_dt_str = edited_task.get("datetime", "")
+        current_dt = _parse_iso_like(current_dt_str)
+        
+        logging.info(f"Current datetime parsed: {current_dt}")
+        
+        # Check if this is an extension/addition
+        if any(keyword in instruction for keyword in ["extend", "add", "postpone", "delay", "push"]):
+            if current_dt:
+                new_dt = _parse_datetime_instruction_from_base(instruction, current_dt)
+                logging.info(f"Extended datetime to: {new_dt}")
+            else:
+                # If no valid current datetime, use now as base
+                new_dt = _parse_datetime_instruction_from_base(instruction, _now_utc())
+                logging.info(f"No current datetime, using now as base: {new_dt}")
+            edited_task["datetime"] = new_dt
+        else:
+            # Absolute datetime setting
+            new_dt = _parse_datetime_instruction(instruction)
+            logging.info(f"Set datetime to: {new_dt}")
+            edited_task["datetime"] = new_dt
+    
+    # Add subtasks
+    if edits.get("add_subtasks"):
+        for sub_data in edits["add_subtasks"]:
+            new_subtask = {
+                "subtask": sub_data.get("subtask", "New subtask"),
+                "details": sub_data.get("details", ""),
+                "datetime": _parse_datetime_instruction(sub_data.get("datetime_instruction", "3 days from now"))
+            }
+            edited_task["subtasks"].append(new_subtask)
+    
+    # Edit subtasks
+    if edits.get("edit_subtasks"):
+        for edit in edits["edit_subtasks"]:
+            idx_or_name = edit.get("index_or_name")
+            field = edit.get("field")
+            new_value = edit.get("new_value")
+            
+            # Find subtask
+            subtask_idx = _find_subtask_index(edited_task["subtasks"], idx_or_name)
+            if subtask_idx is not None:
+                if field == "subtask":
+                    edited_task["subtasks"][subtask_idx]["subtask"] = new_value
+                elif field == "details":
+                    edited_task["subtasks"][subtask_idx]["details"] = new_value
+                elif field == "datetime_instruction":
+                    instruction = new_value.lower().strip()
+                    if any(keyword in instruction for keyword in ["extend", "add", "postpone", "delay"]):
+                        current_dt = _parse_iso_like(edited_task["subtasks"][subtask_idx].get("datetime", ""))
+                        if current_dt:
+                            edited_task["subtasks"][subtask_idx]["datetime"] = _parse_datetime_instruction_from_base(instruction, current_dt)
+                        else:
+                            edited_task["subtasks"][subtask_idx]["datetime"] = _parse_datetime_instruction_from_base(instruction, _now_utc())
+                    else:
+                        edited_task["subtasks"][subtask_idx]["datetime"] = _parse_datetime_instruction(instruction)
+    
+    # Replace subtasks
+    if edits.get("replace_subtasks"):
+        for replacement in edits["replace_subtasks"]:
+            idx_or_name = replacement.get("index_or_name")
+            subtask_idx = _find_subtask_index(edited_task["subtasks"], idx_or_name)
+            if subtask_idx is not None:
+                edited_task["subtasks"][subtask_idx] = {
+                    "subtask": replacement.get("subtask", "Replaced subtask"),
+                    "details": replacement.get("details", ""),
+                    "datetime": _parse_datetime_instruction(replacement.get("datetime_instruction", "3 days from now"))
+                }
+    
+    # Remove subtasks
+    if edits.get("remove_subtasks"):
+        indices_to_remove = []
+        for idx_or_name in edits["remove_subtasks"]:
+            subtask_idx = _find_subtask_index(edited_task["subtasks"], idx_or_name)
+            if subtask_idx is not None:
+                indices_to_remove.append(subtask_idx)
+        
+        # Remove in reverse order to maintain indices
+        for idx in sorted(indices_to_remove, reverse=True):
+            edited_task["subtasks"].pop(idx)
+    
+    logging.info(f"Final edited task datetime: {edited_task.get('datetime')}")
+    return edited_task
+
+
+
+def _parse_datetime_instruction_from_base(instruction: str, base_datetime: datetime) -> str:
+    """
+    Parse datetime instruction relative to a base datetime (for extensions).
+    Examples: "extend 3 days", "extend 2 weeks", "add 5 hours"
+    """
+    instruction_lower = instruction.lower().strip()
+    
+    logging.info(f"Parsing datetime from base: {instruction_lower}, base: {base_datetime}")
+    
+    # Extract the duration - more flexible patterns
+    patterns = [
+        r'(\d+)\s+(day|hour|week|month)s?',  # "3 days", "5 hours"
+        r'(?:extend|add|postpone|delay|push)\s+(?:by\s+)?(\d+)\s+(day|hour|week|month)s?',
+    ]
+    
+    match = None
+    for pattern in patterns:
+        match = re.search(pattern, instruction_lower)
+        if match:
+            break
+    
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2)
+        
+        logging.info(f"Extracted: {amount} {unit}(s)")
+        
+        if unit == "hour":
+            dt = base_datetime + timedelta(hours=amount)
+        elif unit == "day":
+            dt = base_datetime + timedelta(days=amount)
+        elif unit == "week":
+            dt = base_datetime + timedelta(weeks=amount)
+        elif unit == "month":
+            dt = base_datetime + timedelta(days=amount * 30)
+        else:
+            dt = base_datetime + timedelta(days=amount)
+        
+        result = _ensure_datetime_after_now_iso(dt.isoformat())
+        logging.info(f"Calculated new datetime: {result}")
+        return result
+    
+    # Fallback: add 1 day
+    logging.warning("Could not parse duration, defaulting to +1 day")
+    dt = base_datetime + timedelta(days=1)
+    return _ensure_datetime_after_now_iso(dt.isoformat())
+
+
+
+def _fallback_parse_edit_prompt(prompt: str, task: dict) -> dict:
+    """
+    Fallback regex-based parsing when LLM fails.
+    Enhanced to catch more datetime extension patterns.
+    """
+    prompt_lower = prompt.lower()
+    edits = {}
+    
+    # Parse task name change
+    name_match = re.search(r'(?:change|update|rename|set)\s+(?:task\s+)?name\s+(?:to\s+)?["\']([^"\']+)["\']', prompt_lower)
+    if name_match:
+        edits["task_name"] = name_match.group(1).strip().title()
+    
+    # Parse details change
+    details_match = re.search(r'(?:change|update|set)\s+details\s+(?:to\s+)?["\']([^"\']+)["\']', prompt_lower)
+    if details_match:
+        edits["details"] = details_match.group(1).strip()
+    
+    # Parse datetime change - MULTIPLE PATTERNS
+    # Pattern 1: "extend datetime 3 days from now"
+    extend_match = re.search(r'extend\s+(?:the\s+)?(?:datetime|deadline|date)\s+(\d+)\s+(day|hour|week|month)s?', prompt_lower)
+    if extend_match:
+        amount = extend_match.group(1)
+        unit = extend_match.group(2)
+        edits["datetime_instruction"] = f"extend {amount} {unit}s"
+        logging.info(f"Fallback caught: extend {amount} {unit}s")
+    else:
+        # Pattern 2: "extend by 3 days" or "postpone by 3 days"
+        extend_match2 = re.search(r'(?:extend|postpone|delay|push\s+back)\s+(?:by\s+)?(\d+)\s+(day|hour|week|month)s?', prompt_lower)
+        if extend_match2:
+            amount = extend_match2.group(1)
+            unit = extend_match2.group(2)
+            edits["datetime_instruction"] = f"extend {amount} {unit}s"
+            logging.info(f"Fallback caught: extend {amount} {unit}s")
+        else:
+            # Pattern 3: Regular datetime change
+            datetime_match = re.search(r'(?:change|update|set)\s+(?:deadline|date|datetime)\s+(?:to\s+)?(.+?)(?:\s+and|\.|$)', prompt_lower)
+            if datetime_match:
+                edits["datetime_instruction"] = datetime_match.group(1).strip()
+    
+    # Parse add subtask
+    add_match = re.search(r'add\s+subtask\s+["\']([^"\']+)["\']', prompt_lower)
+    if add_match:
+        edits["add_subtasks"] = [{
+            "subtask": add_match.group(1).strip().title(),
+            "details": f"Complete: {add_match.group(1).strip()}",
+            "datetime_instruction": "3 days from now"
+        }]
+    
+    # Parse remove subtask
+    if "remove" in prompt_lower or "delete" in prompt_lower:
+        if "last" in prompt_lower:
+            edits["remove_subtasks"] = [-1]
+        elif "first" in prompt_lower:
+            edits["remove_subtasks"] = [0]
+    
+    return edits
+
+
+def _find_subtask_index(subtasks: List[dict], idx_or_name) -> Optional[int]:
+    """
+    Find subtask index by numeric index or by name match.
+    Supports negative indices (e.g., -1 for last subtask).
+    """
+    if isinstance(idx_or_name, int):
+        if idx_or_name < 0:
+            # Negative index
+            actual_idx = len(subtasks) + idx_or_name
+            if 0 <= actual_idx < len(subtasks):
+                return actual_idx
+        elif 0 <= idx_or_name < len(subtasks):
+            return idx_or_name
+    elif isinstance(idx_or_name, str):
+        # Try as number first
+        if idx_or_name.lstrip('-').isdigit():
+            return _find_subtask_index(subtasks, int(idx_or_name))
+        
+        # Try to find by name match
+        idx_or_name_lower = idx_or_name.lower()
+        for i, sub in enumerate(subtasks):
+            if isinstance(sub, dict):
+                sub_name = sub.get("subtask", "").lower()
+                if idx_or_name_lower in sub_name or sub_name in idx_or_name_lower:
+                    return i
+    
+    return None
+
+
+def _parse_datetime_instruction(instruction: str) -> str:
+    """
+    Parse natural language datetime instruction into ISO datetime string.
+    Examples: "3 days from now", "tomorrow", "2025-11-15", "next week"
+    """
+    if not instruction:
+        return _random_future_datetime_iso()
+    
+    instruction_lower = instruction.lower().strip()
+    now = _now_utc()
+    
+    # Try parsing as ISO date first
+    parsed = _parse_iso_like(instruction)
+    if parsed:
+        return _ensure_datetime_after_now_iso(parsed.isoformat())
+    
+    # Handle relative dates
+    if "tomorrow" in instruction_lower:
+        dt = now + timedelta(days=1)
+        return dt.replace(hour=9, minute=0, second=0, microsecond=0).isoformat() + "Z"
+    
+    if "today" in instruction_lower:
+        dt = now + timedelta(hours=2)  # 2 hours from now
+        return dt.replace(minute=0, second=0, microsecond=0).isoformat() + "Z"
+    
+    if "next week" in instruction_lower:
+        dt = now + timedelta(days=7)
+        return dt.replace(hour=9, minute=0, second=0, microsecond=0).isoformat() + "Z"
+    
+    # Extract "X days/hours from now"
+    match = re.search(r'(\d+)\s+(day|hour|week|month)s?\s+(?:from\s+now)?', instruction_lower)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2)
+        
+        if unit == "hour":
+            dt = now + timedelta(hours=amount)
+        elif unit == "day":
+            dt = now + timedelta(days=amount)
+        elif unit == "week":
+            dt = now + timedelta(weeks=amount)
+        elif unit == "month":
+            dt = now + timedelta(days=amount * 30)
+        else:
+            dt = now + timedelta(days=1)
+        
+        return dt.replace(minute=0, second=0, microsecond=0).isoformat() + "Z"
+    
+    # Fallback
+    return _random_future_datetime_iso()
+
+
+def _fallback_parse_edit_prompt(prompt: str, task: dict) -> dict:
+    """
+    Fallback regex-based parsing when LLM fails.
+    """
+    prompt_lower = prompt.lower()
+    edits = {}
+    
+    # Parse task name change
+    name_match = re.search(r'(?:change|update|rename|set)\s+(?:task\s+)?name\s+(?:to\s+)?["\']([^"\']+)["\']', prompt_lower)
+    if name_match:
+        edits["task_name"] = name_match.group(1).strip().title()
+    
+    # Parse details change
+    details_match = re.search(r'(?:change|update|set)\s+details\s+(?:to\s+)?["\']([^"\']+)["\']', prompt_lower)
+    if details_match:
+        edits["details"] = details_match.group(1).strip()
+    
+    # Parse datetime change
+    datetime_match = re.search(r'(?:change|update|set)\s+(?:deadline|date|datetime)\s+(?:to\s+)?(.+?)(?:\s+and|\.|$)', prompt_lower)
+    if datetime_match:
+        edits["datetime_instruction"] = datetime_match.group(1).strip()
+    
+    # Parse add subtask
+    add_match = re.search(r'add\s+subtask\s+["\']([^"\']+)["\']', prompt_lower)
+    if add_match:
+        edits["add_subtasks"] = [{
+            "subtask": add_match.group(1).strip().title(),
+            "details": f"Complete: {add_match.group(1).strip()}",
+            "datetime_instruction": "3 days from now"
+        }]
+    
+    # Parse remove subtask
+    if "remove" in prompt_lower or "delete" in prompt_lower:
+        if "last" in prompt_lower:
+            edits["remove_subtasks"] = [-1]
+        elif "first" in prompt_lower:
+            edits["remove_subtasks"] = [0]
+    
+    return edits
+
+
+async def _update_task_in_project(project_id: str, task_id: str, updated_task: dict) -> bool:
+    """
+    Update a specific task in a project and persist to backend.
+    Returns True if successful, False otherwise.
+    """
+    # Fetch the full project
+    try:
+        project, external_fetched, numeric_idx = await _fetch_project_by_id(project_id)
+        
+        if not project:
+            return False
+        
+        tasks = project.get("tasks", [])
+        task_idx = None
+        
+        # Find the task to update
+        if task_id.isdigit():
+            idx = int(task_id)
+            if 0 <= idx < len(tasks):
+                task_idx = idx
+        
+        if task_idx is None:
+            # Search by ID
+            for i, task in enumerate(tasks):
+                if isinstance(task, dict):
+                    if task.get("id") == task_id or task.get("_id") == task_id:
+                        task_idx = i
+                        break
+        
+        if task_idx is None:
+            logging.error(f"Task {task_id} not found in project {project_id}")
+            return False
+        
+        # Update the task
+        tasks[task_idx] = updated_task
+        
+        # Persist to in-memory if applicable
+        if numeric_idx is not None:
+            projects[numeric_idx]["tasks"] = tasks
+        
+        # Persist to external service
+        if external_fetched:
+            base = os.getenv("PROJECT_SERVICE_URL")
+            if not base:
+                return False
+            
+            update_path = f"{base.rstrip('/')}/api/v1/project/update/{project_id}/"
+            payload = {"tasks": tasks}
+            
+            async with httpx.AsyncClient() as client:
+                try:
+                    resp = await client.patch(update_path, json=payload, timeout=10.0)
+                    if resp.status_code in (200, 201, 204):
+                        return True
+                    logging.warning(f"Failed to update project: {resp.status_code} {resp.text}")
+                except Exception as e:
+                    logging.error(f"Exception updating project: {e}")
+                    return False
+        
+        return True
+        
+    except Exception as e:
+        logging.error(f"Error updating task in project: {e}")
+        return False
