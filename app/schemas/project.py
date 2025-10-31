@@ -16,3 +16,8 @@ class SubTask(BaseModel):
 
 class TaskDetails(BaseModel):
     details: str  # Details for the task (optional)
+
+class TaskEditRequest(BaseModel):
+    task_id: str
+    prompt: str
+    project_id: str  # needed to locate the task

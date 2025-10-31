@@ -1059,7 +1059,7 @@ async def edit_task(task_id: str, request: TaskEditPromptRequest):
     Supported operations:
     - Edit task name: "change task name to 'Buy groceries'"
     - Edit task details: "update details to 'purchase items from store'"
-    - Edit task datetime: "change deadline to 3 days from now" or "set date to 2025-11-15"
+    - Edit task datetime: "as user promt"
     - Add subtask: "add subtask 'call supplier'"
     - Edit subtask: "change first subtask name to 'email supplier'"
     - Replace subtask: "replace second subtask with 'review documents'"
@@ -1234,38 +1234,321 @@ You are a task editing assistant. Given a task and edit instructions, return a J
 Current task:
 {json.dumps(task, indent=2)}
 
-User edit instructions: "{prompt}"
+Current date/time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-CRITICAL: When the user says "extend the datetime X days from now" or similar, they mean to ADD X days to the CURRENT task datetime.
+User edit instructions: "{prompt}"
 
 Return a JSON object with these optional fields (only include fields that should be changed):
 - task_name: new task name (string)
-- details: new task details (string)  
+- details: new task details (string)
+- details_action: "append", "replace", "remove", or "enhance" - specifies how to handle details
 - datetime_instruction: natural language datetime instruction
+- priority: task priority (string: "low", "medium", "high")
+- status: task status (string: "pending", "in_progress", "completed")
 - add_subtasks: array of subtasks to add, each with {{subtask, details, datetime_instruction}}
 - edit_subtasks: array of edits, each with {{index_or_name, field, new_value}} where field is "subtask", "details", or "datetime_instruction"
 - remove_subtasks: array of subtask indices or names to remove
 - replace_subtasks: array with {{index_or_name, subtask, details, datetime_instruction}}
 
-For datetime_instruction, use these formats:
-- If extending/postponing from current: "extend 3 days" or "add 5 days"
-- If setting absolute date: "2025-11-15" or "tomorrow" or "5 days from now"
+DETAILS EDITING RULES:
+1. ADD/APPEND new content to existing details:
+   - details_action: "append"
+   - details: "the new content to add"
+   - Result: existing details + new content
+   
+2. REPLACE all details with new content:
+   - details_action: "replace"
+   - details: "the new complete details"
+   - Result: completely new details (old details discarded)
+   
+3. ENHANCE/MAKE MORE DESCRIPTIVE:
+   - details_action: "enhance"
+   - details: "enhanced version of the existing details"
+   - Use this when user asks to make details more descriptive, elaborate, detailed, or comprehensive
+   - Take the existing details and expand them with more context, specifics, and clarity
+   - Result: improved version of existing details
+   
+4. REMOVE all details:
+   - details_action: "remove"
+   - details: "" (can be empty)
+   - Result: no details
 
-Examples:
+DATETIME INSTRUCTION RULES:
+1. EXTENDING/POSTPONING from current task datetime:
+   - "extend 3 days" - add 3 days to current task datetime
+   - "add 5 days" - add 5 days to current task datetime
+   - "postpone 2 weeks" - add 14 days to current task datetime
+   - "move 48 hours" - add 48 hours to current task datetime
+
+2. ABSOLUTE DATE/TIME settings:
+   - ISO format: "2025-11-15", "2025-12-03T21:30:00"
+   - Natural dates: "November 5th at 10 AM", "Dec 10, 2025, 08:45"
+   - Casual/Short formats: "11 dec", "5 nov", "dec 11", "15th", "tomorrow"
+   - Relative to NOW: "tomorrow", "in 3 days", "next Friday at 6 PM", "two weeks from now"
+   - Specific day: "Monday, 4th November, 2:00 PM", "next Monday"
+   - Week/Month references: "first week of December", "last Friday of November", "first Monday of December 2025"
+   - Same day patterns: "same day next month", "same weekday next month"
+   - Month name variants: Accept both abbreviated and full month names
+   - Date number only: "15" or "15th" (use current/next month based on context)
+
+3. RELATIVE TO ANOTHER TASK/EVENT:
+   - "2 days before due date"
+   - "15 minutes before event starts"
+   - "one day before main task"
+   - "two days after approval"
+   - "48 hours after current deadline"
+
+4. CONDITIONAL/BUSINESS LOGIC:
+   - "next working day after December 1st"
+   - "if deadline falls on weekend, move to next Monday"
+   - "three business days from today"
+   - "second Tuesday of December"
+
+5. RECURRING/REPEATING:
+   - "repeat weekly"
+   - "every Sunday at midnight"
+   - "every 2nd and 4th Thursday"
+   - "every 3 days until done"
+
+MONTH ABBREVIATION MAPPING:
+Always convert abbreviated months to full month names in the output:
+- jan → January
+- feb → February
+- mar → March
+- apr → April
+- may → May
+- jun → June
+- jul → July
+- aug → August
+- sep → September
+- oct → October
+- nov → November
+- dec → December
+
+DATETIME PARSING INTELLIGENCE:
+- Parse casual date formats and convert to full month names: "11 dec" → "December 11", "5 nov" → "November 5"
+- Accept abbreviated months (jan, feb, mar, apr, may, jun, jul, aug, sep, oct, nov, dec) and convert to full names
+- Handle day-month and month-day orders: "11 dec" and "dec 11" both become "December 11"
+- If only day number given (like "15th"), infer current or next month
+- Accept dates without year (default to current year or next year if past)
+- Normalize time formats: "10am", "10 am", "10:00 AM" all work
+- Handle informal language: "deadline 11 dec", "due dec 11", "by 11th december"
+- Always output full month names, never abbreviations
+
+SUBTASK DATETIME DEPENDENCIES:
+- For subtasks with relative dates to parent: "one day before main task", "two days after parent completion", "same day as parent"
+- Use "depends_on_parent" prefix: "depends_on_parent: -1 day", "depends_on_parent: +2 days"
+
+EXAMPLES:
 
 Input: "extend the datetime 3 days from now"
 Output: {{"datetime_instruction": "extend 3 days"}}
 
-Input: "extend deadline by 5 days"  
+Input: "extend deadline by 5 days"
 Output: {{"datetime_instruction": "extend 5 days"}}
 
 Input: "postpone by 1 week"
 Output: {{"datetime_instruction": "extend 7 days"}}
 
+Input: "move deadline 48 hours after current deadline"
+Output: {{"datetime_instruction": "extend 48 hours"}}
+
 Input: "set deadline to 2025-11-15"
 Output: {{"datetime_instruction": "2025-11-15"}}
 
-Return ONLY the JSON object, no other text.
+Input: "set deadline to 11 dec"
+Output: {{"datetime_instruction": "December 11"}}
+
+Input: "set date: 2025-12-11"
+Output: {{"datetime_instruction": "2025-12-11"}}
+
+Input: "deadline 15 nov"
+Output: {{"datetime_instruction": "November 15"}}
+
+Input: "due date dec 20"
+Output: {{"datetime_instruction": "December 20"}}
+
+Input: "change to 5th"
+Output: {{"datetime_instruction": "5th"}}
+
+Input: "deadline 20 jan"
+Output: {{"datetime_instruction": "January 20"}}
+
+Input: "set to 15 feb"
+Output: {{"datetime_instruction": "February 15"}}
+
+Input: "due mar 10"
+Output: {{"datetime_instruction": "March 10"}}
+
+Input: "schedule 5 apr"
+Output: {{"datetime_instruction": "April 5"}}
+
+Input: "deadline 30 may"
+Output: {{"datetime_instruction": "May 30"}}
+
+Input: "set to 18 jun"
+Output: {{"datetime_instruction": "June 18"}}
+
+Input: "due jul 25"
+Output: {{"datetime_instruction": "July 25"}}
+
+Input: "deadline 12 aug"
+Output: {{"datetime_instruction": "August 12"}}
+
+Input: "set to 8 sep"
+Output: {{"datetime_instruction": "September 8"}}
+
+Input: "due oct 22"
+Output: {{"datetime_instruction": "October 22"}}
+
+Input: "Set the meeting date to 5th November at 10 AM"
+Output: {{"datetime_instruction": "November 5th at 10 AM"}}
+
+Input: "Schedule for next Friday at 6 PM"
+Output: {{"datetime_instruction": "next Friday at 6 PM"}}
+
+Input: "Change to last Friday of November"
+Output: {{"datetime_instruction": "last Friday of November"}}
+
+Input: "Task due date will be November 20th"
+Output: {{"datetime_instruction": "November 20th"}}
+
+Input: "Deadline is in 3 days"
+Output: {{"datetime_instruction": "in 3 days"}}
+
+Input: "Due date two weeks from now"
+Output: {{"datetime_instruction": "two weeks from now"}}
+
+Input: "set to 11 december"
+Output: {{"datetime_instruction": "December 11"}}
+
+Input: "deadline by dec 15th"
+Output: {{"datetime_instruction": "December 15"}}
+
+Input: "reschedule to 20 nov"
+Output: {{"datetime_instruction": "November 20"}}
+
+Input: "Add subtask 'Buy helmet', due tomorrow"
+Output: {{"add_subtasks": [{{"subtask": "Buy helmet", "details": "", "datetime_instruction": "tomorrow"}}]}}
+
+Input: "Add subtask 'Check tire', due in 3 days"
+Output: {{"add_subtasks": [{{"subtask": "Check tire pressure", "details": "", "datetime_instruction": "in 3 days"}}]}}
+
+Input: "Create subtask 'Find documents', date next Monday"
+Output: {{"add_subtasks": [{{"subtask": "Find old documents", "details": "", "datetime_instruction": "next Monday"}}]}}
+
+Input: "Add subtask 'Email supplier', deadline 2025-11-06"
+Output: {{"add_subtasks": [{{"subtask": "Email supplier", "details": "", "datetime_instruction": "2025-11-06"}}]}}
+
+Input: "Add subtask 'Email supplier', deadline 6 nov"
+Output: {{"add_subtasks": [{{"subtask": "Email supplier", "details": "", "datetime_instruction": "November 6"}}]}}
+
+Input: "Add subtask 'Call client', deadline 15 jan"
+Output: {{"add_subtasks": [{{"subtask": "Call client", "details": "", "datetime_instruction": "January 15"}}]}}
+
+Input: "Create subtask 'Submit report', due 10 mar"
+Output: {{"add_subtasks": [{{"subtask": "Submit report", "details": "", "datetime_instruction": "March 10"}}]}}
+
+Input: "Add subtask 'Review files', date 22 aug"
+Output: {{"add_subtasks": [{{"subtask": "Review files", "details": "", "datetime_instruction": "August 22"}}]}}
+
+Input: "Add subtask 'Verify supplier', must be done one day before main task"
+Output: {{"add_subtasks": [{{"subtask": "Verify supplier details", "details": "", "datetime_instruction": "depends_on_parent: -1 day"}}]}}
+
+Input: "Create subtask 'Collect documents', scheduled two days after approval"
+Output: {{"add_subtasks": [{{"subtask": "Collect documents", "details": "", "datetime_instruction": "depends_on_parent: +2 days"}}]}}
+
+Input: "add details: call my mom"
+Output: {{"details": "call my mom", "details_action": "append"}}
+
+Input: "Add more details to the task, mention the time and reason"
+Output: {{"details": "Time and reason need to be specified", "details_action": "append"}}
+
+Input: "Update task with items and estimated cost"
+Output: {{"details": "Items list and estimated cost", "details_action": "append"}}
+
+Input: "set details: call my mom"
+Output: {{"details": "call my mom", "details_action": "replace"}}
+
+Input: "Update the task details with new information about the meeting"
+Output: {{"details": "New information about the meeting", "details_action": "replace"}}
+
+Input: "Change details to: Buy groceries including milk, eggs, bread"
+Output: {{"details": "Buy groceries including milk, eggs, bread", "details_action": "replace"}}
+
+Input: "add a more descriptive details"
+Current details: "Research different bike options, visit local bike shops, test ride bikes, compare prices, purchase chosen bike"
+Output: {{"details": "Research various types of bikes online, shortlist potential models based on budget and features, visit multiple local bike shops for expert advice, take several bikes for test rides to compare comfort and performance, evaluate price differences and available discounts, and finally purchase the bike that best meets your needs and preferences", "details_action": "enhance"}}
+
+Input: "make the task description more detailed"
+Current details: "Call mom"
+Output: {{"details": "Call mom to check on her health, ask about her day, discuss upcoming family events, and ensure she has everything she needs", "details_action": "enhance"}}
+
+Input: "elaborate on the task details"
+Current details: "Buy groceries"
+Output: {{"details": "Buy groceries from the local supermarket, including fresh vegetables, fruits, dairy products like milk and eggs, bread, and essential pantry items. Check for weekly discounts and use the shopping list to avoid missing items", "details_action": "enhance"}}
+
+Input: "make it more comprehensive"
+Current details: "Prepare presentation"
+Output: {{"details": "Prepare a comprehensive presentation by researching the topic thoroughly, creating an outline with key points, designing engaging slides with visuals and data, practicing the delivery multiple times, and preparing for potential questions from the audience", "details_action": "enhance"}}
+
+Input: "add more descriptive content"
+Current details: "Fix bug"
+Output: {{"details": "Fix the bug by first reproducing the issue in the development environment, analyzing error logs and stack traces, identifying the root cause in the codebase, implementing a proper fix, writing test cases to prevent regression, and thoroughly testing the solution before deployment", "details_action": "enhance"}}
+
+Input: "Remove the description, keep only title"
+Output: {{"details_action": "remove"}}
+
+Input: "Delete all additional notes"
+Output: {{"details_action": "remove"}}
+
+Input: "Clear task details"
+Output: {{"details_action": "remove"}}
+
+Input: "Add details and mark as high priority"
+Output: {{"details": "Additional details", "details_action": "append", "priority": "high"}}
+
+Input: "Set reminder for 15 minutes before event starts"
+Output: {{"datetime_instruction": "15 minutes before event"}}
+
+Input: "Reschedule to 48 hours after current deadline"
+Output: {{"datetime_instruction": "extend 48 hours"}}
+
+Input: "Move due date two weeks earlier"
+Output: {{"datetime_instruction": "extend -14 days"}}
+
+Input: "Shift deadline to same day next month"
+Output: {{"datetime_instruction": "same day next month"}}
+
+Input: "Schedule for first Monday of December 2025"
+Output: {{"datetime_instruction": "first Monday of December 2025"}}
+
+Input: "Set to next working day after December 1st"
+Output: {{"datetime_instruction": "next working day after December 1st"}}
+
+Input: "Schedule for three business days from today"
+Output: {{"datetime_instruction": "three business days from today"}}
+
+CRITICAL RULES:
+- ALWAYS distinguish between "extend/add/postpone X days" (relative to current task datetime) vs "in X days" (relative to now)
+- If user says "extend", "add more", "postpone", "delay" - use "extend X days/hours"
+- If user says "set to", "change to", "schedule for", "due date is", "deadline" - use absolute datetime instruction
+- For subtask dependencies on parent task, use "depends_on_parent: +/-X days/hours"
+- For details: use details_action to specify "append", "replace", "remove", or "enhance"
+- When adding/appending details, provide the content to be added WITHOUT prefixes
+- When replacing details, provide the complete new content WITHOUT prefixes
+- When enhancing details, EXPAND the existing details to make them more descriptive, comprehensive, and detailed
+- When removing details, set details_action to "remove"
+- ENHANCE action keywords: "more descriptive", "more detailed", "elaborate", "comprehensive", "enrich", "expand on", "add more context"
+- ALWAYS convert month abbreviations to full names: jan→January, feb→February, mar→March, apr→April, may→May, jun→June, jul→July, aug→August, sep→September, oct→October, nov→November, dec→December
+- Parse casual date formats intelligently: "11 dec" → "December 11", "5 jan" → "January 5", "mar 20" → "March 20"
+- Accept abbreviated months in any format (lowercase, uppercase, mixed) and normalize to full capitalized month names
+- Normalize dates to readable format with full month names: "11 dec" → "December 11", NOT "dec 11" or "11 dec"
+- Parse time components carefully: "10 AM", "21:30", "08:45", "11:59 PM", "10am", "10 am"
+- Handle various date formats: ISO, natural language, casual shorthand, relative expressions
+- Be flexible with date input variations: "11 dec", "dec 11", "11th dec", "december 11", "11 december"
+
+Return ONLY the JSON object, no other text or explanation.
 """
     
     try:
