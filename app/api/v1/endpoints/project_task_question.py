@@ -1255,19 +1255,19 @@ DETAILS EDITING RULES:
    - details_action: "append"
    - details: "the new content to add"
    - Result: existing details + new content
-   
+  
 2. REPLACE all details with new content:
    - details_action: "replace"
    - details: "the new complete details"
    - Result: completely new details (old details discarded)
-   
+  
 3. ENHANCE/MAKE MORE DESCRIPTIVE:
    - details_action: "enhance"
    - details: "enhanced version of the existing details"
    - Use this when user asks to make details more descriptive, elaborate, detailed, or comprehensive
    - Take the existing details and expand them with more context, specifics, and clarity
    - Result: improved version of existing details
-   
+  
 4. REMOVE all details:
    - details_action: "remove"
    - details: "" (can be empty)
@@ -1282,8 +1282,11 @@ DATETIME INSTRUCTION RULES:
 
 2. ABSOLUTE DATE/TIME settings:
    - ISO format: "2025-11-15", "2025-12-03T21:30:00"
-   - Natural dates: "November 5th at 10 AM", "Dec 10, 2025, 08:45"
+   - Natural dates with year: "January 31, 2026", "November 5, 2025", "December 15, 2026"
+   - Abbreviated dates with year: "jan 31, 2026", "nov 5, 2025", "dec 15, 2026"
+   - Day-month-year format: "25 jan, 2036", "15 dec, 2025", "5 nov, 2026"
    - Casual/Short formats: "11 dec", "5 nov", "dec 11", "15th", "tomorrow"
+   - Numeric date formats: "26-6-2026", "6-26-2026", "26/6/2026", "6/26/2026", "26.6.2026"
    - Relative to NOW: "tomorrow", "in 3 days", "next Friday at 6 PM", "two weeks from now"
    - Specific day: "Monday, 4th November, 2:00 PM", "next Monday"
    - Week/Month references: "first week of December", "last Friday of November", "first Monday of December 2025"
@@ -1325,21 +1328,145 @@ Always convert abbreviated months to full month names in the output:
 - nov → November
 - dec → December
 
+NUMERIC DATE PARSING:
+Handle various numeric date formats and convert to ISO or readable format:
+- "DD-MM-YYYY" format: "26-6-2026" → "2026-06-26"
+- "MM-DD-YYYY" format: "6-26-2026" → "2026-06-26"
+- "DD/MM/YYYY" format: "26/6/2026" → "2026-06-26"
+- "MM/DD/YYYY" format: "6/26/2026" → "2026-06-26"
+- "DD.MM.YYYY" format: "26.6.2026" → "2026-06-26"
+- Ambiguous dates: If day ≤ 12, assume DD-MM-YYYY format by default
+- If day > 12, it's clearly the day (e.g., "26-6-2026" means day=26, month=6)
+- Single digit months/days are acceptable: "5-6-2026", "26-6-2026"
+
+DATE WITH YEAR PARSING:
+Handle dates that include year in various formats:
+- "Month DD, YYYY": "January 31, 2026", "December 15, 2025" → "2026-01-31", "2025-12-15"
+- "mon DD, YYYY": "jan 31, 2026", "dec 15, 2025" → "2026-01-31", "2025-12-15"
+- "DD mon, YYYY": "25 jan, 2036", "15 dec, 2025" → "2036-01-25", "2025-12-15"
+- "DD Month, YYYY": "25 January, 2036", "15 December, 2025" → "2036-01-25", "2025-12-15"
+- Accept with or without comma: "jan 31 2026", "25 jan 2036", "January 31 2026"
+- Always convert to ISO format (YYYY-MM-DD) when year is provided
+
 DATETIME PARSING INTELLIGENCE:
 - Parse casual date formats and convert to full month names: "11 dec" → "December 11", "5 nov" → "November 5"
 - Accept abbreviated months (jan, feb, mar, apr, may, jun, jul, aug, sep, oct, nov, dec) and convert to full names
 - Handle day-month and month-day orders: "11 dec" and "dec 11" both become "December 11"
+- Parse dates with year: "January 31, 2026" → "2026-01-31", "jan 31, 2026" → "2026-01-31", "25 jan, 2036" → "2036-01-25"
+- Parse numeric dates: "26-6-2026", "6/26/2026", "26.6.2026" all convert to "2026-06-26"
 - If only day number given (like "15th"), infer current or next month
 - Accept dates without year (default to current year or next year if past)
 - Normalize time formats: "10am", "10 am", "10:00 AM" all work
 - Handle informal language: "deadline 11 dec", "due dec 11", "by 11th december"
-- Always output full month names, never abbreviations
+- Always output ISO format (YYYY-MM-DD) when year is provided in input
+- Output readable format when year is NOT provided: "December 11" (not "dec 11")
+- FLEXIBLE DATE KEYWORD RECOGNITION: Recognize any variation of "deadline", "due date", "deu date", "in date", "date will be", "date =", "due =", "deadline =", "due date =", "set date", "change date", "schedule date", "by date", "on date", "for date", "at date" — all treated as setting the task's datetime_instruction
+- DATE FORMAT FLEXIBILITY: Accept "december 5", "5 december", "5 dec", "dec 5", "december 5th", "5th december", "5th dec", "dec 5th", "december 5 2025", "5 december 2025", "dec 5 2025", "January 31, 2026", "jan 31, 2026", "25 jan, 2036", "26-6-2026", "6/26/2026", etc.
 
 SUBTASK DATETIME DEPENDENCIES:
 - For subtasks with relative dates to parent: "one day before main task", "two days after parent completion", "same day as parent"
 - Use "depends_on_parent" prefix: "depends_on_parent: -1 day", "depends_on_parent: +2 days"
 
 EXAMPLES:
+
+Input: "deadline January 31, 2026"
+Output: {{"datetime_instruction": "2026-01-31"}}
+
+Input: "set date to jan 31, 2026"
+Output: {{"datetime_instruction": "2026-01-31"}}
+
+Input: "due date 25 jan, 2036"
+Output: {{"datetime_instruction": "2036-01-25"}}
+
+Input: "deadline 15 December, 2025"
+Output: {{"datetime_instruction": "2025-12-15"}}
+
+Input: "set to December 5, 2026"
+Output: {{"datetime_instruction": "2026-12-05"}}
+
+Input: "due nov 20, 2025"
+Output: {{"datetime_instruction": "2025-11-20"}}
+
+Input: "schedule 10 mar 2026"
+Output: {{"datetime_instruction": "2026-03-10"}}
+
+Input: "deadline February 28 2026"
+Output: {{"datetime_instruction": "2026-02-28"}}
+
+Input: "set the deadline 26-6-2026"
+Output: {{"datetime_instruction": "2026-06-26"}}
+
+Input: "deadline = 15-12-2025"
+Output: {{"datetime_instruction": "2025-12-15"}}
+
+Input: "due date 5/11/2025"
+Output: {{"datetime_instruction": "2025-11-05"}}
+
+Input: "set date to 20.3.2026"
+Output: {{"datetime_instruction": "2026-03-20"}}
+
+Input: "deadline 1-1-2026"
+Output: {{"datetime_instruction": "2026-01-01"}}
+
+Input: "due 31/12/2025"
+Output: {{"datetime_instruction": "2025-12-31"}}
+
+Input: "schedule for 10-5-2026"
+Output: {{"datetime_instruction": "2026-05-10"}}
+
+Input: "deadline = december 5"
+Output: {{"datetime_instruction": "December 5"}}
+
+Input: "due date=5 dec"
+Output: {{"datetime_instruction": "December 5"}}
+
+Input: "deu date = dec 5"
+Output: {{"datetime_instruction": "December 5"}}
+
+Input: "in date = 5 december"
+Output: {{"datetime_instruction": "December 5"}}
+
+Input: "date will be=december 5"
+Output: {{"datetime_instruction": "December 5"}}
+
+Input: "date = 5 dec"
+Output: {{"datetime_instruction": "December 5"}}
+
+Input: "deadline=5th december"
+Output: {{"datetime_instruction": "December 5th"}}
+
+Input: "due=dec 15"
+Output: {{"datetime_instruction": "December 15"}}
+
+Input: "set date to 15 jan"
+Output: {{"datetime_instruction": "January 15"}}
+
+Input: "change due date to 20 feb"
+Output: {{"datetime_instruction": "February 20"}}
+
+Input: "schedule for 10 mar"
+Output: {{"datetime_instruction": "March 10"}}
+
+Input: "by date = 5 apr"
+Output: {{"datetime_instruction": "April 5"}}
+
+Input: "on 12 aug"
+Output: {{"datetime_instruction": "August 12"}}
+
+Input: "for 8 sep"
+Output: {{"datetime_instruction": "September 8"}}
+
+Input: "at oct 22"
+Output: {{"datetime_instruction": "October 22"}}
+
+Input: "deadline = 5 december at 3 PM"
+Output: {{"datetime_instruction": "December 5 at 3 PM"}}
+
+Input: "due date=dec 11, 10:30 AM"
+Output: {{"datetime_instruction": "December 11 at 10:30 AM"}}
+
+Input: "date will be = 15th nov"
+Output: {{"datetime_instruction": "November 15th"}}
 
 Input: "extend the datetime 3 days from now"
 Output: {{"datetime_instruction": "extend 3 days"}}
@@ -1443,6 +1570,12 @@ Output: {{"add_subtasks": [{{"subtask": "Email supplier", "details": "", "dateti
 Input: "Add subtask 'Email supplier', deadline 6 nov"
 Output: {{"add_subtasks": [{{"subtask": "Email supplier", "details": "", "datetime_instruction": "November 6"}}]}}
 
+Input: "Add subtask 'Email supplier', deadline 15-11-2025"
+Output: {{"add_subtasks": [{{"subtask": "Email supplier", "details": "", "datetime_instruction": "2025-11-15"}}]}}
+
+Input: "Add subtask 'Email supplier', deadline jan 15, 2026"
+Output: {{"add_subtasks": [{{"subtask": "Email supplier", "details": "", "datetime_instruction": "2026-01-15"}}]}}
+
 Input: "Add subtask 'Call client', deadline 15 jan"
 Output: {{"add_subtasks": [{{"subtask": "Call client", "details": "", "datetime_instruction": "January 15"}}]}}
 
@@ -1451,6 +1584,12 @@ Output: {{"add_subtasks": [{{"subtask": "Submit report", "details": "", "datetim
 
 Input: "Add subtask 'Review files', date 22 aug"
 Output: {{"add_subtasks": [{{"subtask": "Review files", "details": "", "datetime_instruction": "August 22"}}]}}
+
+Input: "Add subtask 'Review files', date 22/8/2026"
+Output: {{"add_subtasks": [{{"subtask": "Review files", "details": "", "datetime_instruction": "2026-08-22"}}]}}
+
+Input: "Add subtask 'Meeting', date December 20, 2026"
+Output: {{"add_subtasks": [{{"subtask": "Meeting", "details": "", "datetime_instruction": "2026-12-20"}}]}}
 
 Input: "Add subtask 'Verify supplier', must be done one day before main task"
 Output: {{"add_subtasks": [{{"subtask": "Verify supplier details", "details": "", "datetime_instruction": "depends_on_parent: -1 day"}}]}}
@@ -1532,7 +1671,7 @@ Output: {{"datetime_instruction": "three business days from today"}}
 CRITICAL RULES:
 - ALWAYS distinguish between "extend/add/postpone X days" (relative to current task datetime) vs "in X days" (relative to now)
 - If user says "extend", "add more", "postpone", "delay" - use "extend X days/hours"
-- If user says "set to", "change to", "schedule for", "due date is", "deadline" - use absolute datetime instruction
+- If user says "set to", "change to", "schedule for", "due date is", "deadline", "deadline =", "due =", "due date =", "deu date =", "in date =", "date will be", "date =", "by date", "on date", "for date", "at date" - use absolute datetime instruction
 - For subtask dependencies on parent task, use "depends_on_parent: +/-X days/hours"
 - For details: use details_action to specify "append", "replace", "remove", or "enhance"
 - When adding/appending details, provide the content to be added WITHOUT prefixes
@@ -1541,12 +1680,18 @@ CRITICAL RULES:
 - When removing details, set details_action to "remove"
 - ENHANCE action keywords: "more descriptive", "more detailed", "elaborate", "comprehensive", "enrich", "expand on", "add more context"
 - ALWAYS convert month abbreviations to full names: jan→January, feb→February, mar→March, apr→April, may→May, jun→June, jul→July, aug→August, sep→September, oct→October, nov→November, dec→December
+- Parse dates with year in ISO format: "January 31, 2026" → "2026-01-31", "jan 31, 2026" → "2026-01-31", "25 jan, 2036" → "2036-01-25"
+- Accept formats: "Month DD, YYYY", "mon DD, YYYY", "DD mon, YYYY", "DD Month, YYYY" (with or without commas)
+- Parse numeric date formats: "26-6-2026" → "2026-06-26", "15/12/2025" → "2025-12-15", "10.3.2026" → "2026-03-10"
+- For numeric dates with separators (-./), assume DD-MM-YYYY format unless day > 12, then it's obvious
+- Accept single or double digit days/months: "5-6-2026" and "05-06-2026" are both valid
 - Parse casual date formats intelligently: "11 dec" → "December 11", "5 jan" → "January 5", "mar 20" → "March 20"
-- Accept abbreviated months in any format (lowercase, uppercase, mixed) and normalize to full capitalized month names
-- Normalize dates to readable format with full month names: "11 dec" → "December 11", NOT "dec 11" or "11 dec"
+- When year is provided, ALWAYS output in ISO format (YYYY-MM-DD)
+- When year is NOT provided, output in readable format: "December 11" (not "dec 11")
+- For numeric dates, output in ISO format: "26-6-2026" → "2026-06-26"
 - Parse time components carefully: "10 AM", "21:30", "08:45", "11:59 PM", "10am", "10 am"
-- Handle various date formats: ISO, natural language, casual shorthand, relative expressions
-- Be flexible with date input variations: "11 dec", "dec 11", "11th dec", "december 11", "11 december"
+- Handle various date formats: ISO, natural language with year, abbreviated with year, casual shorthand, numeric formats (DD-MM-YYYY, DD/MM/YYYY, DD.MM.YYYY), relative expressions, and flexible keyword prefixes
+- Be flexible with date input variations: "January 31, 2026", "jan 31, 2026", "25 jan, 2036", "11 dec", "dec 11", "26-6-2026", "26/6/2026", etc.
 
 Return ONLY the JSON object, no other text or explanation.
 """
