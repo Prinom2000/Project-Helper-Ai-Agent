@@ -2,6 +2,7 @@
 
 ## Overview
 A comprehensive FastAPI-based backend service for intelligent project and task management with AI-powered features. The system provides natural language processing capabilities for task generation, editing, and project assistance.
+## LIVE👉 https://ai.gogetagenie.com/
 
 ## Features
 
@@ -361,25 +362,6 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 ## Architecture
 
-### Project Structure
-```
-project-task-api/
-├── api/
-│   └── v1/
-│       └── endpoints/
-│           └── project_task_question.py
-├── app/
-│   ├── schemas/
-│   │   └── project.py
-│   ├── services/
-│   │   └── openai_service.py
-│   └── utils/
-│       └── task_utils.py
-├── .env
-├── .env.example
-├── requirements.txt
-└── README.md
-```
 
 ### Data Flow
 ```
@@ -557,6 +539,9 @@ python-dotenv==1.0.0
 pydantic==2.5.0
 ```
 
+## Deploy:
+- **Digitalocean**
+
 
 ### Version 1.0.0 (Current)
 - Initial release
@@ -569,3 +554,4 @@ pydantic==2.5.0
 ---
 
 **Built with ❤️ using FastAPI and OpenAI**
+
