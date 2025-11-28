@@ -2,7 +2,7 @@
 
 ## Overview
 A comprehensive FastAPI-based backend service for intelligent project and task management with AI-powered features. The system provides natural language processing capabilities for task generation, editing, and project assistance.
-## LIVE👉 https://ai.gogetagenie.com/
+## LIVE👉 https://ai.gogetagenie.com/docs
 
 ## Features
 
@@ -554,4 +554,5 @@ pydantic==2.5.0
 ---
 
 **Built with ❤️ using FastAPI and OpenAI**
+
 
