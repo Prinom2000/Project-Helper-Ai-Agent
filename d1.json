@@ -1,0 +1,89 @@
+{
+  "userId": "507f1f77bcf86cd799439011",
+  "goal": "Build E-commerce Platform with Mobile App",
+  "tasks": [
+    {
+      "task": "Frontend Development",
+      "taskDueDate": "2025-02-15T00:00:00.000Z",
+      "isStar": true,
+      "subtasks": [
+        {
+          "title": "Setup Project Structure",
+          "subTaskDueDate": "2025-01-05T00:00:00.000Z",
+          "isComplite": true,
+          "subtasks": [
+            {
+              "title": "Initialize Next.js project",
+              "subTaskDueDate": "2025-01-02T00:00:00.000Z",
+              "isComplite": true,
+              "subtasks": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task": "Backend Development",
+      "taskDueDate": "2025-03-01T00:00:00.000Z",
+      "isStar": true,
+      "subtasks": [
+        {
+          "title": "Setup Node.js Backend",
+          "subTaskDueDate": "2025-01-10T00:00:00.000Z",
+          "isComplite": true,
+          "subtasks": [
+            {
+              "title": "Initialize Express server",
+              "subTaskDueDate": null,
+              "isComplite": true,
+              "subtasks": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task": "Testing",
+      "taskDueDate": "2025-03-15T00:00:00.000Z",
+      "subtasks": [
+        {
+          "title": "Unit Testing",
+          "subTaskDueDate": "2025-02-20T00:00:00.000Z",
+          "subtasks": [
+            {
+              "title": "Test API endpoints",
+              "subTaskDueDate": null,
+              "subtasks": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task": "Deployment",
+      "taskDueDate": "2025-03-30T00:00:00.000Z",
+      "isStar": true,
+      "subtasks": [
+        {
+          "title": "Setup hosting",
+          "subTaskDueDate": "2025-03-15T00:00:00.000Z",
+          "subtasks": [
+            {
+              "title": "Deploy backend to AWS",
+              "subTaskDueDate": null,
+              "subtasks": []
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "answered_questions": [
+    {
+      "question": "What is the primary goal of this project?",
+      "answer": "To create a fully functional e-commerce platform with web and mobile interfaces"
+    }
+  ],
+  "visibility": "private",
+  "linkAccess": false
+}

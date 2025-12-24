@@ -200,6 +200,376 @@ async def get_project(project_id: str):
         raise HTTPException(status_code=404, detail="Project not found")
     return {"project": project}
 
+
+# Helper: try to create a project in the external service using several common endpoints
+async def _create_project_in_service(project_payload: dict) -> tuple[bool, dict]:
+    base = os.getenv("PROJECT_SERVICE_URL")
+    if not base:
+        return False, {"error": "PROJECT_SERVICE_URL not set in environment (.env)"}
+
+    candidate_paths = [
+        f"{base.rstrip('/')}/api/v1/project/",
+        f"{base.rstrip('/')}/api/v1/project/create/",
+        f"{base.rstrip('/')}/api/v1/project/new/",
+    ]
+
+    last_err = None
+    async with httpx.AsyncClient() as client:
+        for path in candidate_paths:
+            try:
+                resp = await client.post(path, json=project_payload, timeout=10.0)
+                logging.info(f"Create attempt: POST {path} -> {resp.status_code}")
+                if resp.status_code in (200, 201):
+                    try:
+                        return True, resp.json()
+                    except Exception:
+                        return True, {"status": resp.status_code, "text": resp.text}
+                last_err = {"status": resp.status_code, "text": resp.text}
+            except Exception as e:
+                last_err = {"exception": str(e)}
+                logging.warning("Exception on create attempt %s: %s", path, e)
+
+    return False, {"error": "failed to create project", "last": last_err}
+
+
+async def _fetch_projects_for_user(user_id: str) -> list:
+    """Fetch all projects for a given user from the backend list endpoint.
+    Returns a list of project dicts (may be empty).
+    """
+    base = os.getenv("PROJECT_SERVICE_URL")
+    if not base:
+        return []
+    path = f"{base.rstrip('/')}/api/v1/project/user/project/{user_id}/"
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(path, timeout=10.0)
+        if resp.status_code != 200:
+            logging.warning(f"Failed to fetch user projects: {resp.status_code} {resp.text}")
+            return []
+        payload = resp.json()
+        projects_list = payload.get("data") if isinstance(payload, dict) and payload.get("data") else payload
+        # Expecting a list; if single project wrapped, normalize
+        if isinstance(projects_list, dict):
+            return [projects_list]
+        if isinstance(projects_list, list):
+            return projects_list
+        return []
+    except Exception as e:
+        logging.warning(f"Exception fetching user projects: {e}")
+        return []
+
+
+async def _find_project_for_user(user_id: str, query_text: Optional[str] = None) -> tuple[Optional[dict], Optional[str]]:
+    """Find a project for a user optionally matching query_text in goal/title.
+    Returns (project_obj, project_id) or (None, None).
+    """
+    projects_list = await _fetch_projects_for_user(user_id)
+    if not projects_list:
+        return None, None
+
+    # If query_text provided, try to match by goal/title (case-insensitive substring)
+    if query_text:
+        q = query_text.lower().strip()
+        for p in projects_list:
+            # project goal can be in multiple fields
+            candidates = [p.get("goal") or p.get("project_goal") or p.get("title") or p.get("name") or ""]
+            for c in candidates:
+                try:
+                    if c and q in str(c).lower():
+                        return p, str(p.get("_id") or p.get("id") or "")
+                except Exception:
+                    continue
+    # If no query, and only one project, return it
+    if len(projects_list) == 1:
+        p = projects_list[0]
+        return p, str(p.get("_id") or p.get("id") or "")
+
+    # No obvious match
+    return None, None
+
+
+class AgentRequest(BaseModel):
+    message: str
+    project_id: Optional[str] = None
+    user_id: Optional[str] = Field(None, alias="userId")
+
+    class Config:
+        allow_population_by_field_name = True
+        extra = "ignore"
+
+
+@router.post("/agent/")
+async def project_agent(payload: AgentRequest):
+    """Universal agent endpoint using an LLM-based intent parser.
+
+    The LLM should return a strict JSON object describing the intent and any structured data needed.
+    Supported intents: create_project, edit_task, get_project, generate_title, project_tasks, get_task, ask, chat, general
+    """
+    msg = (payload.message or "").strip()
+    if not msg:
+        raise HTTPException(status_code=400, detail="No message provided")
+
+    # Ask the LLM to extract an intent and structured data (return ONLY JSON)
+    intent_prompt = (
+        "You are an intent parser. Read the user's message and return ONLY a JSON object (no extra text) with the following possible keys:\n"
+        "- intent: one of [create_project, edit_task, get_project, generate_title, project_tasks, get_task, ask, chat, general]\n"
+        "- project_id: optional string\n"
+        "- task_id: optional string\n"
+        "- title_text: optional string (for generate_title)\n"
+        "- prompt: optional string (for project_tasks)\n"
+        "- project: optional object (goal, tasks, answered_questions) for create_project\n"
+        "- edit: optional object describing edits (for edit_task or project updates)\n"
+        "- message: original message or cleaned text\n\n"
+        "Examples (return only JSON):\n"
+        "1) 'Create project with goal: Launch X and tasks: [""Build landing page"", ""Run ads""]' -> {\"intent\":\"create_project\", \"project\": {\"goal\":\"Launch X\", \"tasks\": [\"Build landing page\", \"Run ads\"]}}\n"
+        "2) 'Edit task id 123 change name to Buy veggies' -> {\"intent\":\"edit_task\", \"task_id\":\"123\", \"edit\": {\"task\":\"Buy veggies\"}}\n\n"
+        f"User message:\n{msg}\n\nReturn only JSON."
+    )
+
+    try:
+        intent_gen = await generate_text(intent_prompt)
+        parsed_intent = _parse_possible_json_string(intent_gen) or {}
+    except Exception as e:
+        logging.warning("Intent parser failed: %s", e)
+        parsed_intent = {}
+
+    intent = (parsed_intent.get("intent") or "chat").lower()
+
+    # If intent is 'ask' (we intentionally removed performing ask actions in the agent),
+    # do a second LLM disambiguation pass to verify whether the user actually meant
+    # 'ask' or they intended one of the other actionable intents (create_project, project_tasks, edit_task, etc.).
+    if intent == "ask":
+        try:
+            disamb_prompt = (
+                "You previously classified a message as an 'ask' intent. Re-evaluate the following user message and return ONLY a JSON object with a single key 'intent' whose value should be one of: "
+                "[ask, create_project, edit_task, project_tasks, get_project, generate_title, get_task, chat, general]. "
+                "If the user is asking to add or create a task, return 'project_tasks'. If the user is asking to create a new project, return 'create_project'. "
+                "If the user is editing a task, return 'edit_task'. Otherwise return 'ask'.\n\n"
+                f"User message:\n{msg}\n\nReturn only JSON."
+            )
+            disamb_gen = await generate_text(disamb_prompt)
+            disamb = _parse_possible_json_string(disamb_gen) or {}
+            new_intent = (disamb.get("intent") or "ask").lower()
+            if new_intent != "ask":
+                intent = new_intent
+        except Exception:
+            # if disambiguation fails, fall back to original 'ask' behavior
+            pass
+
+    # Helper to safe-get project_id from parsed intent or payload
+    def _get_project_id():
+        return parsed_intent.get("project_id") or payload.project_id
+
+    # Dispatch based on intent
+    try:
+        user_id = parsed_intent.get("user_id") or payload.user_id
+
+        if intent == "create_project":
+            project_data = parsed_intent.get("project") or {}
+            # If no structured project, ask LLM to extract it (fallback)
+            if not project_data:
+                extract_prompt = (
+                    f"Extract a project from this user input. Return ONLY a JSON object with keys: goal (string), tasks (array), answered_questions (optional). User text:\n{msg}\nReturn only JSON."
+                )
+                gen = await generate_text(extract_prompt)
+                project_data = _parse_possible_json_string(gen) or {}
+
+            tasks = project_data.get("tasks") or []
+            normalized_tasks = []
+            for t in tasks:
+                if isinstance(t, str):
+                    normalized_tasks.append({"task": t, "details": "", "datetime": _random_future_datetime_iso(), "subtasks": []})
+                elif isinstance(t, dict):
+                    normalized_tasks.append({
+                        "task": t.get("task") or t.get("title") or "Untitled Task",
+                        "details": t.get("details", ""),
+                        "datetime": _ensure_datetime_after_now_iso(t.get("datetime") or t.get("due")),
+                        "subtasks": t.get("subtasks", []) or []
+                    })
+
+            project_obj = {
+                "goal": project_data.get("goal") or project_data.get("project_goal") or "Untitled Project",
+                "tasks": normalized_tasks,
+                "answered_questions": project_data.get("answered_questions", []) or []
+            }
+
+            base = os.getenv("PROJECT_SERVICE_URL")
+            # If user_id is provided, prefer the user-specific create endpoint
+            if user_id and base:
+                create_path = f"{base.rstrip('/')}/api/v1/project/create/{user_id}/"
+                try:
+                    async with httpx.AsyncClient() as client:
+                        resp = await client.post(create_path, json=project_obj, timeout=10.0)
+                    if resp.status_code in (200, 201):
+                        try:
+                            return {"success": True, "created": resp.json()}
+                        except Exception:
+                            return {"success": True, "created": {"status": resp.status_code, "text": resp.text}}
+                    logging.warning(f"User create endpoint failed: {resp.status_code} {resp.text}")
+                except Exception as e:
+                    logging.warning(f"Exception calling user create endpoint: {e}")
+
+            # fallback: try generic create endpoints
+            success, resp = await _create_project_in_service(project_obj)
+            if success:
+                return {"success": True, "created": resp}
+
+            # final fallback: in-memory
+            new_idx = max(projects.keys()) + 1 if projects else 0
+            projects[new_idx] = project_obj
+            return {"success": True, "project_id": str(new_idx), "project": project_obj}
+
+        elif intent == "edit_task":
+            task_id = parsed_intent.get("task_id")
+            # if task_id not provided, try to find by task name within user's projects
+            if not task_id:
+                task_name = parsed_intent.get("task_name") or parsed_intent.get("edit", {}).get("task") or None
+                if not task_name and user_id:
+                    # try to infer task name from message
+                    task_name = msg
+                if task_name and user_id:
+                    # search user's projects for a matching task title
+                    projects_list = await _fetch_projects_for_user(user_id)
+                    found = None
+                    for p in projects_list:
+                        tasks = p.get("tasks") or []
+                        for idx, t in enumerate(tasks):
+                            title = t.get("task") if isinstance(t, dict) else str(t)
+                            if title and task_name.lower() in title.lower():
+                                # found it
+                                task = t if isinstance(t, dict) else {"task": title, "details": "", "datetime": "", "subtasks": []}
+                                project_id = str(p.get("_id") or p.get("id") or "")
+                                # prefer task _id if available
+                                task_identifier = str(t.get("_id") or t.get("id") or idx)
+                                found = (task, task_identifier, project_id)
+                                break
+                        if found:
+                            break
+                    if not found:
+                        raise HTTPException(status_code=404, detail="Task not found by name for this user")
+                    task, task_id, found_project_id = found
+                else:
+                    raise HTTPException(status_code=400, detail="edit_task requires task_id or task_name and user_id")
+
+            else:
+                # we have an explicit task_id; try to locate across projects
+                task, found_project_id = await _find_task_across_projects(task_id, hint_project_id=_get_project_id())
+                if not task and user_id:
+                    # try searching user's projects
+                    projects_list = await _fetch_projects_for_user(user_id)
+                    found = None
+                    for p in projects_list:
+                        tasks = p.get("tasks") or []
+                        for idx, t in enumerate(tasks):
+                            if (isinstance(t, dict) and (t.get("_id") == task_id or t.get("id") == task_id)) or (not isinstance(t, dict) and str(idx) == task_id):
+                                task = t if isinstance(t, dict) else {"task": str(t), "details": "", "datetime": "", "subtasks": []}
+                                found_project_id = str(p.get("_id") or p.get("id") or "")
+                                found = True
+                                break
+                        if found:
+                            break
+                    if not task:
+                        raise HTTPException(status_code=404, detail="Task not found")
+
+            # Use existing edit parser to apply instructions
+            edited_task = await _parse_and_apply_task_edits(task.copy(), msg)
+            success = await _update_task_in_project(found_project_id, task_id, edited_task)
+            if not success:
+                raise HTTPException(status_code=500, detail="Failed to persist edited task")
+
+            return {"success": True, "project_id": found_project_id, "task": _prepare_task_response(edited_task)}
+
+        elif intent == "get_project":
+            pid = parsed_intent.get("project_id") or payload.project_id
+            # If project id not provided but user_id is, try to find project for user
+            if not pid and user_id:
+                q = parsed_intent.get("project_query") or msg
+                proj, proj_id = await _find_project_for_user(user_id, q)
+                if not proj:
+                    raise HTTPException(status_code=404, detail="Project not found for user")
+                return {"project": proj}
+
+            if not pid:
+                raise HTTPException(status_code=400, detail="get_project requires project_id or user_id context")
+
+            project, external_fetched, numeric_idx = await _fetch_project_by_id(pid)
+            if not project:
+                raise HTTPException(status_code=404, detail="Project not found")
+            return {"project": project}
+
+        elif intent == "generate_title":
+            text = parsed_intent.get("title_text") or parsed_intent.get("message") or msg
+            prompt = (
+                "Summarize the following project title/idea into a short, clear project title (max 6 words). "
+                "Return only the title on a single line with no additional explanation.\n\n"
+                + text
+            )
+            title = (await generate_text(prompt)) or ""
+            title = title.strip().splitlines()[0].strip(' "\'')
+            parts = title.split()
+            if len(parts) > 6:
+                title = " ".join(parts[:6])
+            return {"title": title}
+
+        elif intent == "project_tasks":
+            pid = parsed_intent.get("project_id") or payload.project_id
+            if not pid and user_id:
+                # try to find project by query
+                q = parsed_intent.get("project_query") or msg
+                proj, proj_id = await _find_project_for_user(user_id, q)
+                if not proj:
+                    raise HTTPException(status_code=404, detail="Project not found for user")
+                pid = proj_id
+            if not pid:
+                raise HTTPException(status_code=400, detail="project_tasks requires project_id or user context")
+            prompt_text = parsed_intent.get("prompt")
+            return await project_tasks(pid, prompt=prompt_text)
+
+        elif intent == "get_task":
+            pid = parsed_intent.get("project_id") or payload.project_id
+            task_id = parsed_intent.get("task_id")
+            if not pid and user_id:
+                # try find project for user
+                proj, proj_id = await _find_project_for_user(user_id, parsed_intent.get("project_query") or msg)
+                if proj:
+                    pid = proj_id
+            if not pid or not task_id:
+                raise HTTPException(status_code=400, detail="get_task requires project_id and task_id (or user context + task_id)")
+            return await get_task(pid, task_id)
+
+        elif intent == "ask":
+            # 'ask' operations are handled by the dedicated /ask/{project_id}/ endpoint.
+            # Agent intentionally does not perform 'ask' actions; instruct the caller to use the specific route.
+            raise HTTPException(status_code=400, detail="Please use the /ask/{project_id}/ endpoint to generate or fetch project questions; the agent does not handle 'ask' intents.")
+
+        # chat intents
+        elif intent in ("chat", "general"):
+            pid = parsed_intent.get("project_id") or payload.project_id
+            if not pid and user_id:
+                # attempt to pick a project for the user if message references one
+                proj, proj_id = await _find_project_for_user(user_id, parsed_intent.get("project_query") or msg)
+                if proj:
+                    pid = proj_id
+            if pid:
+                resp = await chat_with_project_assistant(pid, msg)
+                if isinstance(resp, dict) and resp.get("response"):
+                    return {"response": resp.get("response")}
+                return {"response": resp}
+            reply = await generate_text(msg)
+            return {"response": reply}
+
+        else:
+            # Unknown intent - fallback to chat
+            reply = await generate_text(msg)
+            return {"response": reply}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.exception("Error in agent dispatch: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
 # reuse existing helper to call OpenAI with context
 async def generate_text_with_context(context: str):
     try:

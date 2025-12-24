@@ -1,0 +1,399 @@
+{
+  "userId": "507f1f77bcf86cd799439011",
+  "goal": "Build a Complete E-commerce Platform with Mobile App",
+  "tasks": [
+    {
+      "task": "Frontend Development",
+      "details": "Build responsive UI/UX for the e-commerce platform using React and Next.js",
+      "taskDueDate": "2025-02-15T00:00:00.000Z",
+      "isDeleted": false,
+      "isComplite": false,
+      "isArchived": false,
+      "isStar": true,
+      "subtasks": [
+        {
+          "title": "Setup Project Structure",
+          "subTaskDueDate": "2025-01-05T00:00:00.000Z",
+          "isStar": true,
+          "isDeleted": false,
+          "isComplite": true,
+          "subtasks": [
+            {
+              "title": "Initialize Next.js project",
+              "subTaskDueDate": "2025-01-02T00:00:00.000Z",
+              "isStar": false,
+              "isDeleted": false,
+              "isComplite": true,
+              "subtasks": [
+                {
+                  "title": "Install dependencies",
+                  "subTaskDueDate": "2025-01-01T00:00:00.000Z",
+                  "isStar": false,
+                  "isDeleted": false,
+                  "isComplite": true,
+                  "subtasks": []
+                },
+                {
+                  "title": "Configure TypeScript",
+                  "subTaskDueDate": "2025-01-02T00:00:00.000Z",
+                  "isStar": false,
+                  "isDeleted": false,
+                  "isComplite": true,
+                  "subtasks": []
+                }
+              ]
+            },
+            {
+              "title": "Setup folder structure",
+              "subTaskDueDate": "2025-01-03T00:00:00.000Z",
+              "isStar": false,
+              "isDeleted": false,
+              "isComplite": true,
+              "subtasks": []
+            }
+          ]
+        },
+        {
+          "title": "Design Homepage",
+          "subTaskDueDate": "2025-01-20T00:00:00.000Z",
+          "isStar": true,
+          "isDeleted": false,
+          "isComplite": false,
+          "subtasks": [
+            {
+              "title": "Create Hero Section",
+              "subTaskDueDate": "2025-01-10T00:00:00.000Z",
+              "isStar": false,
+              "isDeleted": false,
+              "isComplite": true,
+              "subtasks": []
+            },
+            {
+              "title": "Build Product Grid",
+              "subTaskDueDate": "2025-01-15T00:00:00.000Z",
+              "isStar": false,
+              "isDeleted": false,
+              "isComplite": false,
+              "subtasks": [
+                {
+                  "title": "Create product card",
+                  "subTaskDueDate": null,
+                  "isStar": false,
+                  "isDeleted": false,
+                  "isComplite": true,
+                  "subtasks": []
+                },
+                {
+                  "title": "Implement grid layout",
+                  "subTaskDueDate": null,
+                  "isStar": false,
+                  "isDeleted": false,
+                  "isComplite": false,
+                  "subtasks": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task": "Backend Development",
+      "details": "Build RESTful API using Node.js, Express, and MongoDB",
+      "taskDueDate": "2025-03-01T00:00:00.000Z",
+      "isDeleted": false,
+      "isComplite": false,
+      "isArchived": false,
+      "isStar": true,
+      "subtasks": [
+        {
+          "title": "Setup Node.js Backend",
+          "subTaskDueDate": "2025-01-10T00:00:00.000Z",
+          "isStar": true,
+          "isDeleted": false,
+          "isComplite": true,
+          "subtasks": [
+            {
+              "title": "Initialize Express server",
+              "subTaskDueDate": null,
+              "isStar": false,
+              "isDeleted": false,
+              "isComplite": true,
+              "subtasks": []
+            },
+            {
+              "title": "Connect to MongoDB",
+              "subTaskDueDate": null,
+              "isStar": false,
+              "isDeleted": false,
+              "isComplite": true,
+              "subtasks": [
+                {
+                  "title": "Setup Mongoose",
+                  "subTaskDueDate": null,
+                  "isStar": false,
+                  "isDeleted": false,
+                  "isComplite": true,
+                  "subtasks": []
+                },
+                {
+                  "title": "Create models",
+                  "subTaskDueDate": null,
+                  "isStar": false,
+                  "isDeleted": false,
+                  "isComplite": true,
+                  "subtasks": [
+                    {
+                      "title": "User model",
+                      "subTaskDueDate": null,
+                      "isStar": false,
+                      "isDeleted": false,
+                      "isComplite": true,
+                      "subtasks": []
+                    },
+                    {
+                      "title": "Product model",
+                      "subTaskDueDate": null,
+                      "isStar": false,
+                      "isDeleted": false,
+                      "isComplite": true,
+                      "subtasks": []
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "Implement Authentication",
+          "subTaskDueDate": "2025-01-25T00:00:00.000Z",
+          "isStar": true,
+          "isDeleted": false,
+          "isComplite": false,
+          "subtasks": [
+            {
+              "title": "Setup JWT authentication",
+              "subTaskDueDate": null,
+              "isStar": false,
+              "isDeleted": false,
+              "isComplite": true,
+              "subtasks": []
+            },
+            {
+              "title": "Create auth endpoints",
+              "subTaskDueDate": null,
+              "isStar": false,
+              "isDeleted": false,
+              "isComplite": false,
+              "subtasks": [
+                {
+                  "title": "Registration endpoint",
+                  "subTaskDueDate": null,
+                  "isStar": false,
+                  "isDeleted": false,
+                  "isComplite": false,
+                  "subtasks": []
+                },
+                {
+                  "title": "Login endpoint",
+                  "subTaskDueDate": null,
+                  "isStar": false,
+                  "isDeleted": false,
+                  "isComplite": false,
+                  "subtasks": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "Build Product API",
+          "subTaskDueDate": "2025-02-10T00:00:00.000Z",
+          "isStar": false,
+          "isDeleted": false,
+          "isComplite": false,
+          "subtasks": [
+            {
+              "title": "Create CRUD endpoints",
+              "subTaskDueDate": null,
+              "isStar": false,
+              "isDeleted": false,
+              "isComplite": false,
+              "subtasks": [
+                {
+                  "title": "GET all products",
+                  "subTaskDueDate": null,
+                  "isStar": false,
+                  "isDeleted": false,
+                  "isComplite": false,
+                  "subtasks": []
+                },
+                {
+                  "title": "POST create product",
+                  "subTaskDueDate": null,
+                  "isStar": false,
+                  "isDeleted": false,
+                  "isComplite": false,
+                  "subtasks": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task": "Testing",
+      "details": "Write tests and ensure code quality",
+      "taskDueDate": "2025-03-15T00:00:00.000Z",
+      "isDeleted": false,
+      "isComplite": false,
+      "isArchived": false,
+      "isStar": false,
+      "subtasks": [
+        {
+          "title": "Unit Testing",
+          "subTaskDueDate": "2025-02-20T00:00:00.000Z",
+          "isStar": false,
+          "isDeleted": false,
+          "isComplite": false,
+          "subtasks": [
+            {
+              "title": "Test API endpoints",
+              "subTaskDueDate": null,
+              "isStar": false,
+              "isDeleted": false,
+              "isComplite": false,
+              "subtasks": []
+            },
+            {
+              "title": "Test React components",
+              "subTaskDueDate": null,
+              "isStar": false,
+              "isDeleted": false,
+              "isComplite": false,
+              "subtasks": []
+            }
+          ]
+        },
+        {
+          "title": "E2E Testing",
+          "subTaskDueDate": "2025-03-10T00:00:00.000Z",
+          "isStar": false,
+          "isDeleted": false,
+          "isComplite": false,
+          "subtasks": [
+            {
+              "title": "Setup Cypress",
+              "subTaskDueDate": null,
+              "isStar": false,
+              "isDeleted": false,
+              "isComplite": false,
+              "subtasks": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task": "Deployment",
+      "details": "Deploy application and setup CI/CD",
+      "taskDueDate": "2025-03-30T00:00:00.000Z",
+      "isDeleted": false,
+      "isComplite": false,
+      "isArchived": false,
+      "isStar": true,
+      "subtasks": [
+        {
+          "title": "Setup hosting",
+          "subTaskDueDate": "2025-03-15T00:00:00.000Z",
+          "isStar": false,
+          "isDeleted": false,
+          "isComplite": false,
+          "subtasks": [
+            {
+              "title": "Deploy backend to AWS",
+              "subTaskDueDate": null,
+              "isStar": false,
+              "isDeleted": false,
+              "isComplite": false,
+              "subtasks": []
+            },
+            {
+              "title": "Deploy frontend to Vercel",
+              "subTaskDueDate": null,
+              "isStar": false,
+              "isDeleted": false,
+              "isComplite": false,
+              "subtasks": []
+            }
+          ]
+        },
+        {
+          "title": "Configure CI/CD",
+          "subTaskDueDate": "2025-03-25T00:00:00.000Z",
+          "isStar": true,
+          "isDeleted": false,
+          "isComplite": false,
+          "subtasks": [
+            {
+              "title": "Setup GitHub Actions",
+              "subTaskDueDate": null,
+              "isStar": false,
+              "isDeleted": false,
+              "isComplite": false,
+              "subtasks": [
+                {
+                  "title": "Create build workflow",
+                  "subTaskDueDate": null,
+                  "isStar": false,
+                  "isDeleted": false,
+                  "isComplite": false,
+                  "subtasks": []
+                },
+                {
+                  "title": "Create deployment workflow",
+                  "subTaskDueDate": null,
+                  "isStar": false,
+                  "isDeleted": false,
+                  "isComplite": false,
+                  "subtasks": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "Setup monitoring",
+          "subTaskDueDate": "2025-03-28T00:00:00.000Z",
+          "isStar": false,
+          "isDeleted": false,
+          "isComplite": false,
+          "subtasks": [
+            {
+              "title": "Integrate Sentry",
+              "subTaskDueDate": null,
+              "isStar": false,
+              "isDeleted": false,
+              "isComplite": false,
+              "subtasks": []
+            },
+            {
+              "title": "Setup CloudWatch",
+              "subTaskDueDate": null,
+              "isStar": false,
+              "isDeleted": false,
+              "isComplite": false,
+              "subtasks": []
+            }
+          ]
+        }
+      ]
+    }
+  ],
+
+  "visibility": "private",
+  "sharedWith": [],
+  "linkAccess": false
+}
