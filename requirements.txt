@@ -5,3 +5,5 @@ pydantic
 openai==0.28
 python-dotenv
 httpx 
+openrouter
+requests
