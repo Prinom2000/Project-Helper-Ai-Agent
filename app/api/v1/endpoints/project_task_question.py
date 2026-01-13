@@ -1,5 +1,4 @@
 # api/v1/endpoints/project_task_question.py
-import openai
 import asyncio
 from fastapi import APIRouter, HTTPException, Request
 from app.schemas.project import Answer
@@ -472,7 +471,14 @@ async def project_agent(payload: AgentRequest):
                         raise HTTPException(status_code=404, detail="Task not found")
 
             # Use existing edit parser to apply instructions
-            edited_task = await _parse_and_apply_task_edits(task.copy(), msg)
+            edited_task, should_delete = await _parse_and_apply_task_edits(task.copy(), msg)
+
+            if should_delete:
+                deleted = await _delete_task_in_project(found_project_id, task_id)
+                if not deleted:
+                    raise HTTPException(status_code=500, detail="Failed to persist task deletion")
+                return {"success": True, "project_id": found_project_id, "message": "Task deleted"}
+
             success = await _update_task_in_project(found_project_id, task_id, edited_task)
             if not success:
                 raise HTTPException(status_code=500, detail="Failed to persist edited task")
@@ -570,19 +576,13 @@ async def project_agent(payload: AgentRequest):
         raise HTTPException(status_code=500, detail=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
-# reuse existing helper to call OpenAI with context
+# reuse existing helper to call LLM via OpenRouter-backed service
 async def generate_text_with_context(context: str):
     try:
-        response = await asyncio.to_thread(openai.ChatCompletion.create,
-                                            model="gpt-3.5-turbo",
-                                            messages=[
-                                                {"role": "system", "content": "You are a helpful assistant named OLLIE that helps users with project details."},
-                                                {"role": "user", "content": context}
-                                            ],
-                                            max_tokens=300,
-                                            temperature=0.7,
-        )
-        return response['choices'][0]['message']['content'].strip()
+        # delegate to the centralized OpenRouter-backed generate_text helper
+        return await generate_text(context, max_tokens=300)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating response: {str(e)}")
 
@@ -1467,14 +1467,53 @@ async def edit_task(task_id: str, request: TaskEditPromptRequest):
     if not actual_project_id:
         raise HTTPException(status_code=400, detail="Could not determine project_id for this task")
     
-    # Parse and apply edits
+    # Quick deterministic fallback for simple "add/make/create subtask: <title>" prompts
+    edited_task = None
+    should_delete = False
     try:
-        edited_task = await _parse_and_apply_task_edits(task, prompt)
-        logging.info(f"Edited task: {json.dumps(edited_task, indent=2)}")
+        m = re.search(r"(?i)\b(?:add|make|create)\s+(?:a\s+)?subtask\s*[:\-]?\s*(?:'|\")?(.+?)(?:'|\")?$", prompt)
+        if m:
+            sub_title = m.group(1).strip()
+            if sub_title:
+                # ensure subtasks list exists
+                if not isinstance(task.get("subtasks"), list):
+                    task["subtasks"] = []
+                task["subtasks"].append({
+                    "subtask": sub_title,
+                    "details": "",
+                    "datetime": _random_future_datetime_iso()
+                })
+                edited_task = task
+                should_delete = False
+                logging.info(f"Applied simple add-subtask fallback: {sub_title}")
+        # If not handled by fallback, use LLM parser
+        if edited_task is None:
+            edited_task, should_delete = await _parse_and_apply_task_edits(task, prompt)
+            logging.info(f"Edited task: {json.dumps(edited_task, indent=2)} | should_delete={should_delete}")
     except Exception as e:
         logging.error(f"Error parsing prompt: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to parse edit instructions: {str(e)}")
-    
+
+    # Handle deletion request
+    if should_delete:
+        logging.info(f"User requested deletion of task {task_id} in project {actual_project_id}")
+        deleted = await _delete_task_in_project(actual_project_id, task_id)
+        logging.info(f"Deletion persistence success: {deleted}")
+        logging.info(f"=== EDIT TASK END ===")
+        if not deleted:
+            return {
+                "success": False,
+                "statusCode": 500,
+                "message": "Task removed locally but failed to persist deletion to backend",
+                "data": _prepare_task_response(task)
+            }
+        return {
+            "success": True,
+            "statusCode": 200,
+            "message": "Task successfully deleted",
+            "data": _prepare_task_response(task)
+        }
+
     # Ensure all datetimes are valid and after now
     edited_task["datetime"] = _ensure_datetime_after_now_iso(edited_task.get("datetime", ""))
 
@@ -1586,7 +1625,7 @@ async def _find_task_across_projects(task_id: str, hint_project_id: Optional[str
     
     return None, None
 
-async def _parse_and_apply_task_edits(task: dict, prompt: str) -> dict:
+async def _parse_and_apply_task_edits(task: dict, prompt: str) -> Tuple[dict, bool]:
     """
     Parse natural language prompt and apply edits to the task.
     Returns the edited task dictionary.
@@ -2078,11 +2117,21 @@ Return ONLY the JSON object, no other text or explanation.
         else:
             edits = {}
             logging.warning("No JSON found in LLM response")
+        # Detect deletion instruction in LLM edits or raw prompt
+        prompt_lower = prompt.lower()
+        if edits.get("delete_task") or edits.get("remove_task") or re.search(r'\b(remove|delete)\b.*\b(task|this task|the task)\b', prompt_lower):
+            logging.info("Detected request to delete task")
+            return task, True
     except Exception as e:
         logging.error(f"LLM parsing failed: {e}")
         # Fallback to simple regex parsing
         edits = _fallback_parse_edit_prompt(prompt, task)
         logging.info(f"Fallback parsed edits: {edits}")
+        # Re-check for deletion instruction after fallback
+        prompt_lower = prompt.lower()
+        if edits.get("delete_task") or edits.get("remove_task") or re.search(r'\b(remove|delete)\b.*\b(task|this task|the task)\b', prompt_lower):
+            logging.info("Detected request to delete task (via fallback)")
+            return task, True
     
     # Apply edits to task
     edited_task = task.copy()
@@ -2183,7 +2232,7 @@ Return ONLY the JSON object, no other text or explanation.
             edited_task["subtasks"].pop(idx)
     
     logging.info(f"Final edited task datetime: {edited_task.get('datetime')}")
-    return edited_task
+    return edited_task, False
 
 
 
@@ -2244,16 +2293,28 @@ def _fallback_parse_edit_prompt(prompt: str, task: dict) -> dict:
     prompt_lower = prompt.lower()
     edits = {}
     
-    # Parse task name change
-    name_match = re.search(r'(?:change|update|rename|set)\s+(?:task\s+)?name\s+(?:to\s+)?["\']([^"\']+)["\']', prompt_lower)
+    # Parse task name change (accept quoted or unquoted forms)
+    name_match = re.search(r'(?:change|update|rename|set)\s+(?:the\s+)?(?:task\s+)?name\s+(?:to\s+)?["\']([^"\']+)["\']', prompt_lower)
+    if not name_match:
+        # allow unquoted names: e.g. "change task name to Buy groceries"
+        name_match = re.search(r'(?:change|update|rename|set)\s+(?:the\s+)?(?:task\s+)?name\s+(?:to\s+)?([^\n,\.]{2,100})', prompt_lower)
     if name_match:
         edits["task_name"] = name_match.group(1).strip().title()
+    else:
+        # also accept patterns like "change the task to Buy groceries"
+        direct_name_match = re.search(r'(?:change|update|rename|set)\s+(?:the\s+)?(?:task|it)\s+(?:to|into)\s+["\']?([^"\']+)["\']?', prompt_lower)
+        if direct_name_match:
+            edits["task_name"] = direct_name_match.group(1).strip().title()
     
     # Parse details change
     details_match = re.search(r'(?:change|update|set)\s+details\s+(?:to\s+)?["\']([^"\']+)["\']', prompt_lower)
     if details_match:
         edits["details"] = details_match.group(1).strip()
-    
+
+    # Detect explicit delete/remove task requests
+    if re.search(r'\b(remove|delete)\b.*\b(task|this task|the task)\b', prompt_lower):
+        edits["delete_task"] = True
+        logging.info("Fallback detected delete task instruction")    
     # Parse datetime change - MULTIPLE PATTERNS
     # Pattern 1: "extend datetime 3 days from now"
     extend_match = re.search(r'extend\s+(?:the\s+)?(?:datetime|deadline|date)\s+(\d+)\s+(day|hour|week|month)s?', prompt_lower)
@@ -2383,16 +2444,27 @@ def _fallback_parse_edit_prompt(prompt: str, task: dict) -> dict:
     prompt_lower = prompt.lower()
     edits = {}
     
-    # Parse task name change
-    name_match = re.search(r'(?:change|update|rename|set)\s+(?:task\s+)?name\s+(?:to\s+)?["\']([^"\']+)["\']', prompt_lower)
+    # Parse task name change (accept quoted or unquoted forms)
+    name_match = re.search(r'(?:change|update|rename|set)\s+(?:the\s+)?(?:task\s+)?name\s+(?:to\s+)?["\']([^"\']+)["\']', prompt_lower)
+    if not name_match:
+        name_match = re.search(r'(?:change|update|rename|set)\s+(?:the\s+)?(?:task\s+)?name\s+(?:to\s+)?([^\n,\.]{2,100})', prompt_lower)
     if name_match:
         edits["task_name"] = name_match.group(1).strip().title()
+    else:
+        # also accept patterns like "change the task to Buy groceries"
+        direct_name_match = re.search(r'(?:change|update|rename|set)\s+(?:the\s+)?(?:task|it)\s+(?:to|into)\s+["\']?([^"\']+)["\']?', prompt_lower)
+        if direct_name_match:
+            edits["task_name"] = direct_name_match.group(1).strip().title()
     
     # Parse details change
     details_match = re.search(r'(?:change|update|set)\s+details\s+(?:to\s+)?["\']([^"\']+)["\']', prompt_lower)
     if details_match:
         edits["details"] = details_match.group(1).strip()
-    
+
+    # Detect explicit delete/remove task requests
+    if re.search(r'\b(remove|delete)\b.*\b(task|this task|the task)\b', prompt_lower):
+        edits["delete_task"] = True
+        logging.info("Fallback detected delete task instruction")    
     # Parse datetime change
     datetime_match = re.search(r'(?:change|update|set)\s+(?:deadline|date|datetime)\s+(?:to\s+)?(.+?)(?:\s+and|\.|$)', prompt_lower)
     if datetime_match:
@@ -2419,24 +2491,34 @@ def _fallback_parse_edit_prompt(prompt: str, task: dict) -> dict:
 
 async def _update_task_in_project(project_id: str, task_id: str, updated_task: dict) -> bool:
     """
-    Update a specific task in a project and persist to backend.
+    Update a specific task in a project using the backend's specific endpoints.
     Returns True if successful, False otherwise.
     """
-    # Fetch the full project
+    base = os.getenv("PROJECT_SERVICE_URL")
+    if not base:
+        logging.error("PROJECT_SERVICE_URL not set")
+        return False
+    
     try:
+        # Fetch the full project first to update local copy
         project, external_fetched, numeric_idx = await _fetch_project_by_id(project_id)
         
         if not project:
+            logging.error(f"Project {project_id} not found")
             return False
         
         tasks = project.get("tasks", [])
         task_idx = None
+        actual_task_id = task_id
         
         # Find the task to update
         if task_id.isdigit():
             idx = int(task_id)
             if 0 <= idx < len(tasks):
                 task_idx = idx
+                task_obj = tasks[idx]
+                if isinstance(task_obj, dict):
+                    actual_task_id = task_obj.get("_id") or task_obj.get("id") or task_id
         
         if task_idx is None:
             # Search by ID
@@ -2444,13 +2526,14 @@ async def _update_task_in_project(project_id: str, task_id: str, updated_task: d
                 if isinstance(task, dict):
                     if task.get("id") == task_id or task.get("_id") == task_id:
                         task_idx = i
+                        actual_task_id = task.get("_id") or task.get("id") or task_id
                         break
         
         if task_idx is None:
             logging.error(f"Task {task_id} not found in project {project_id}")
             return False
         
-        # Update the task
+        # Update the task locally
         tasks[task_idx] = updated_task
         
         # Persist to in-memory if applicable
@@ -2459,25 +2542,139 @@ async def _update_task_in_project(project_id: str, task_id: str, updated_task: d
         
         # Persist to external service
         if external_fetched:
-            base = os.getenv("PROJECT_SERVICE_URL")
-            if not base:
-                return False
-            
-            update_path = f"{base.rstrip('/')}/api/v1/project/update/{project_id}/"
-            payload = {"tasks": tasks}
-            
             async with httpx.AsyncClient() as client:
+                # 1. Update task name and basic info via addTask endpoint
+                task_payload = {
+                    "projectId": project_id,
+                    "taskId": actual_task_id,  # Include taskId if updating existing task
+                    "task": updated_task.get("task", ""),
+                    "details": updated_task.get("details", ""),
+                    "taskDueDate": updated_task.get("datetime", updated_task.get("taskDueDate", "")),
+                    "isStar": updated_task.get("isStar", False),
+                }
+                
+                add_task_path = f"{base.rstrip('/')}/api/v1/project/addTask"
                 try:
-                    resp = await client.patch(update_path, json=payload, timeout=10.0)
-                    if resp.status_code in (200, 201, 204):
-                        return True
-                    logging.warning(f"Failed to update project: {resp.status_code} {resp.text}")
+                    resp = await client.post(add_task_path, json=task_payload, timeout=10.0)
+                    logging.info(f"addTask response: {resp.status_code} {resp.text[:500]}")
+                    if resp.status_code not in (200, 201):
+                        logging.warning(f"addTask failed: {resp.status_code}")
+                        return False
                 except Exception as e:
-                    logging.error(f"Exception updating project: {e}")
+                    logging.error(f"Exception calling addTask: {e}")
                     return False
+                
+                # 2. Update subtasks
+                for subtask in updated_task.get("subtasks", []):
+                    if not isinstance(subtask, dict):
+                        continue
+                    
+                    subtask_payload = {
+                        "projectId": project_id,
+                        "taskId": actual_task_id,
+                        "subtaskId": subtask.get("_id", ""),  # Include if exists
+                        "subtaskTitle": subtask.get("subtask", subtask.get("title", "")),
+                        "subTaskDueDate": subtask.get("datetime", subtask.get("subTaskDueDate", "")),
+                    }
+                    
+                    add_subtask_path = f"{base.rstrip('/')}/api/v1/project/addSubTask"
+                    try:
+                        resp = await client.post(add_subtask_path, json=subtask_payload, timeout=10.0)
+                        logging.info(f"addSubTask response: {resp.status_code}")
+                        if resp.status_code not in (200, 201):
+                            logging.warning(f"addSubTask failed for subtask {subtask.get('_id')}: {resp.status_code}")
+                            # Continue with other subtasks even if one fails
+                    except Exception as e:
+                        logging.error(f"Exception calling addSubTask: {e}")
+                        continue
+            
+            return True
         
         return True
         
     except Exception as e:
-        logging.error(f"Error updating task in project: {e}")
+        logging.error(f"Error updating task in project: {e}", exc_info=True)
+        return False
+
+
+
+async def _delete_task_in_project(project_id: str, task_id: str) -> bool:
+    """
+    Delete a specific task in a project.
+    Mark as deleted or remove from array depending on backend capability.
+    Returns True if successful, False otherwise.
+    """
+    try:
+        project, external_fetched, numeric_idx = await _fetch_project_by_id(project_id)
+        if not project:
+            logging.error(f"Project {project_id} not found")
+            return False
+        
+        tasks = project.get("tasks", [])
+        task_idx = None
+        actual_task_id = task_id
+
+        # Find the task to delete
+        if task_id.isdigit():
+            idx = int(task_id)
+            if 0 <= idx < len(tasks):
+                task_idx = idx
+                task_obj = tasks[idx]
+                if isinstance(task_obj, dict):
+                    actual_task_id = task_obj.get("_id") or task_obj.get("id") or task_id
+
+        if task_idx is None:
+            # Search by ID
+            for i, t in enumerate(tasks):
+                if isinstance(t, dict):
+                    if t.get("id") == task_id or t.get("_id") == task_id:
+                        task_idx = i
+                        actual_task_id = t.get("_id") or t.get("id") or task_id
+                        break
+
+        if task_idx is None:
+            logging.error(f"Task {task_id} not found in project {project_id}")
+            return False
+
+        # Option 1: Try to mark as deleted (safer approach)
+        if external_fetched:
+            base = os.getenv("PROJECT_SERVICE_URL")
+            if base:
+                async with httpx.AsyncClient() as client:
+                    # Try to mark task as deleted instead of removing
+                    updated_task = tasks[task_idx].copy() if isinstance(tasks[task_idx], dict) else {"task": str(tasks[task_idx])}
+                    updated_task["isDeleted"] = True
+                    
+                    task_payload = {
+                        "projectId": project_id,
+                        "taskId": actual_task_id,
+                        "task": updated_task.get("task", ""),
+                        "details": updated_task.get("details", ""),
+                        "taskDueDate": updated_task.get("datetime", updated_task.get("taskDueDate", "")),
+                        "isDeleted": True,
+                    }
+                    
+                    add_task_path = f"{base.rstrip('/')}/api/v1/project/addTask"
+                    try:
+                        resp = await client.post(add_task_path, json=task_payload, timeout=10.0)
+                        logging.info(f"Delete task (mark as deleted) response: {resp.status_code}")
+                        if resp.status_code in (200, 201):
+                            # Remove locally
+                            tasks.pop(task_idx)
+                            if numeric_idx is not None:
+                                projects[numeric_idx]["tasks"] = tasks
+                            return True
+                        logging.warning(f"Failed to mark task as deleted: {resp.status_code}")
+                    except Exception as e:
+                        logging.error(f"Exception marking task as deleted: {e}")
+        
+        # Fallback: Remove locally if not persisted externally
+        tasks.pop(task_idx)
+        if numeric_idx is not None:
+            projects[numeric_idx]["tasks"] = tasks
+        
+        return True
+        
+    except Exception as e:
+        logging.error(f"Error deleting task in project: {e}", exc_info=True)
         return False
