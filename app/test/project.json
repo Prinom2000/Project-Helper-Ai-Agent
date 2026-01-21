@@ -1,78 +1,47 @@
 
+
+
 {
-        "_id": "692ad1986b2ed1ddc91d78e8",
-        "userId": "692aaf56f8779c0315434bd7",
-        "goal": "Game Learning Initiative",
-        "visibility": "private",
-        "linkAccess": false,
-        "tasks": [
-            {
-                "task": "Research game-based learning benefits",
-                "details": "Game-based learning has been shown to improve engagement, motivation, problem-solving skills, and knowledge retention among learners.",
-                "taskDueDate": "2025-11-30T09:00:00.000Z",
-                "isDeleted": false,
-                "isComplite": true,
-                "isArchived": false,
-                "isStar": false,
-                "subtasks": [
-                    {
-                        "title": "Review academic studies",
-                        "subTaskDueDate": "2025-11-29T11:57:00.000Z",
-                        "isStar": false,
-                        "isDeleted": false,
-                        "isComplite": false,
-                        "_id": "692ad1aa6b2ed1ddc91d78f6"
-                    },
-                    {
-                        "title": "Interview educators",
-                        "subTaskDueDate": "2025-11-29T11:57:00.000Z",
-                        "isStar": false,
-                        "isDeleted": false,
-                        "isComplite": false,
-                        "_id": "692ad1aa6b2ed1ddc91d78f7"
-                    }
-                ],
-                "_id": "692ad1aa6b2ed1ddc91d78f5"
-            },
-            {
-                "task": "Design game learning framework",
-                "details": "Develop a game learning framework that integrates educational content with interactive gameplay to enhance learning outcomes.",
-                "taskDueDate": "2025-11-30T09:00:00.000Z",
-                "isDeleted": false,
-                "isComplite": false,
-                "isArchived": true,
-                "isStar": false,
-                "subtasks": [
-                    {
-                        "title": "Research existing game learning frameworks",
-                        "subTaskDueDate": "2025-11-29T11:57:00.000Z",
-                        "isStar": false,
-                        "isDeleted": false,
-                        "isComplite": false,
-                        "_id": "692ad1aa6b2ed1ddc91d78f9"
-                    },
-                    {
-                        "title": "Identify key components for the new framework",
-                        "subTaskDueDate": "2025-11-29T11:57:00.000Z",
-                        "isStar": false,
-                        "isDeleted": false,
-                        "isComplite": false,
-                        "_id": "692ad1aa6b2ed1ddc91d78fa"
-                    }
-                ],
-                "_id": "692ad1aa6b2ed1ddc91d78f8"
-            }
-        ],
-        "answered_questions": [],
-        "sharedWith": [],
-        "createdAt": "2025-11-29T10:57:28.328Z",
-        "updatedAt": "2025-11-30T09:06:07.765Z"
+  "response": "Project created — Goal: Make New Website",
+  "created": true,
+  "project": {
+  "userId": "605c72ef1532076f72d9a132",
+  "goal": "Launch New Website",
+  "tasks": [
+    {
+      "title": "Design Homepage",
+      "description": "Design the layout and structure for the homepage",
+      "compliteTarget": "2026-03-02",
+      "subtasks": [
+        {
+          "title": "Wireframe Homepage",
+          "description": "Create wireframe of homepage layout",
+          "compliteTarget": "2026-02-10"
+        },
+        {
+          "title": "UI Design",
+          "description": "Design visual elements like buttons, typography, and colors",
+          "compliteTarget": "2026-02-20"
+        }
+      ]
+    },
+    {
+      "title": "Develop Backend",
+      "description": "Develop backend services to support website functionality",
+      "compliteTarget": "2026-03-12",
+      "subtasks": [
+        {
+          "title": "Set up Database",
+          "description": "Set up and configure the database for storing website data",
+          "compliteTarget": "2026-02-15"
+        },
+        {
+          "title": "API Development",
+          "description": "Develop REST APIs for user interaction and data management",
+          "compliteTarget": "2026-02-25"
+        }
+      ]
     }
-
-
-
-
-
-    
-
-    
+  ]
+}
+}

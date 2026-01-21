@@ -387,7 +387,7 @@ def merge_task_preserving_ids(existing_task: dict, new_task_data: dict) -> dict:
     return merged
 
 
-@router.post("/modify_task/")
+# @router.post("/modify_task/")
 async def modify_task(payload: TaskModifyPayload):
     """
     Add or edit tasks/subtasks in an existing project.

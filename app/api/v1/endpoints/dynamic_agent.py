@@ -17,6 +17,21 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+# Global variable to store last message from task_ask route
+last_messege = {
+    "userId": None,
+    "projectId": None,
+    "text": None,
+}
+
+# Global variable to store last message from subtask_ask route
+last_messege_subtask = {
+    "userId": None,
+    "projectId": None,
+    "taskId": None,
+    "text": None,
+}
+
 
 class ChatPayload(BaseModel):
     userId: str
@@ -156,7 +171,7 @@ Guidelines:
 
     try:
         messages = [{"role": "user", "content": prompt}]
-        result_text = await _call_openrouter(messages, max_tokens=200, temperature=0.5)
+        result_text = await _call_openrouter(messages, max_tokens=10000, temperature=0.5)
 
         # Extract JSON from response
         json_match = re.search(r"\{[\s\S]*\}", result_text)
@@ -250,7 +265,7 @@ async def _repair_project_json(raw_response: str, sample: dict, strict: bool = F
 
     try:
         messages = [{"role": "system", "content": sys_msg}, {"role": "user", "content": user_msg}]
-        repaired = await _call_openrouter(messages, max_tokens=400, temperature=temp)
+        repaired = await _call_openrouter(messages, max_tokens=10000, temperature=temp)
         parsed = _extract_and_parse_json(repaired)
         if parsed:
             return parsed
@@ -426,16 +441,23 @@ async def create_project(payload: ChatPayload):
     # Save the user's create request to history
     await _post_history(base, user_id, user_text, is_ai=False, chat_type="create")
 
-    # Fetch ask history for context
+    # Fetch ask history for context - extract latest message directly
     history = await _fetch_history(base, user_id, chat_type="ask")
-    texts = []
-    for h in history:
-        if isinstance(h, dict):
-            t = h.get("text") or h.get("message") or ""
-            texts.append(str(t))
+    print(f"Fetched ask history: {history}")
+    latest_message = ""
+    if history and isinstance(history, list):
+        # Get the last item from history for context
+        latest_item = history[-1]
+        if isinstance(latest_item, dict):
+            latest_message = latest_item.get("text") or latest_item.get("message") or ""
+            print(f"Latest history item not a dict: {latest_item}")
         else:
-            texts.append(str(h))
-    aggregated = "\n".join(texts)
+            latest_message = str(latest_item)
+            print(f"Latest history item not a dict: {latest_item}")
+        logger.info(f"Retrieved latest message from ask history: {latest_message}")
+    
+    # For intent detection, use both current user text and latest context
+    aggregated = latest_message if latest_message else user_text
 
     # Use LLM to detect if user has a specific topic/intent
     intent_result = await detect_project_intent_with_llm(user_text, aggregated)
@@ -480,30 +502,46 @@ async def create_project(payload: ChatPayload):
 
     # Provide an explicit sample structure
     sample = {
-        "goal": "Build a Complete E-commerce Website",
-        "tasks": [
-            {
-                "task": "Design Database Schema",
-                "details": "Create MongoDB schemas for products, users, and orders",
-                "taskDueDate": "2026-02-28",
-                "subtasks": [
-                    {"title": "Design User Schema", "subTaskDueDate": "2026-02-20"},
-                    {"title": "Design Product Schema", "subTaskDueDate": "2026-02-23"},
-                    {"title": "Design Order Schema", "subTaskDueDate": "2026-02-25"}
-                ]
-            },
-            {
-                "task": "Develop Frontend",
-                "details": "Build React components for the website",
-                "taskDueDate": "2026-03-15",
-                "subtasks": [
-                    {"title": "Create Home Page", "subTaskDueDate": "2026-03-05"},
-                    {"title": "Create Product Listing Page", "subTaskDueDate": "2026-03-08"},
-                    {"title": "Create Product Detail Page", "subTaskDueDate": "2026-03-12"}
-                ]
-            }
-        ]
+  "userId": "605c72ef1532076f72d9a132",
+  "goal": "Launch New Website",
+  "tasks": [
+    {
+      "title": "Design Homepage",
+      "description": "Design the layout and structure for the homepage",
+      "compliteTarget": "2026-03-02",
+      "subtasks": [
+        {
+          "title": "Wireframe Homepage",
+          "description": "Create wireframe of homepage layout",
+          "compliteTarget": "2026-02-10"
+        },
+        {
+          "title": "UI Design",
+          "description": "Design visual elements like buttons, typography, and colors",
+          "compliteTarget": "2026-02-20"
+        }
+      ]
+    },
+    {
+      "title": "Develop Backend",
+      "description": "Develop backend services to support website functionality",
+      "compliteTarget": "2026-03-12",
+      "subtasks": [
+        {
+          "title": "Set up Database",
+          "description": "Set up and configure the database for storing website data",
+          "compliteTarget": "2026-02-15"
+        },
+        {
+          "title": "API Development",
+          "description": "Develop REST APIs for user interaction and data management",
+          "compliteTarget": "2026-02-25"
+        }
+      ]
     }
+  ]
+ }
+
 
     prompt = (
         prompt_intro
@@ -516,7 +554,7 @@ async def create_project(payload: ChatPayload):
 
     gen = await generate_text_with_context(prompt, system_name="Genie")
     
-    logger.info(f"LLM response for project creation: {gen[:300]}")
+    logger.info(f"LLM response for project creation: {gen}")
 
     # Extract and parse JSON using robust function
     project_obj = _extract_and_parse_json(gen)
@@ -550,13 +588,43 @@ async def create_project(payload: ChatPayload):
 
     project_obj = _normalize_project_obj(project_obj, min_tasks=min_tasks_count)
 
-    # Send to createFullProject endpoint
-    create_path = f"{base.rstrip('/')}/api/v1/project/createFullProject/{user_id}"
+    # Transform normalized project to requested schema and include userId
+    create_payload = {
+        "userId": user_id,
+        "goal": project_obj.get("goal"),
+        "tasks": []
+    }
+
+    for t in project_obj.get("tasks", []) or []:
+        title = t.get("task") or t.get("title") or "Untitled Task"
+        description = t.get("details") or t.get("description") or ""
+        complite_target = t.get("taskDueDate") or t.get("compliteTarget") or None
+        subtasks_out = []
+        for st in t.get("subtasks", []) or []:
+            st_title = st.get("title") or st.get("task") or "Subtask"
+            st_description = st.get("description") or ""
+            st_complite = st.get("subTaskDueDate") or st.get("compliteTarget") or None
+            subtasks_out.append({
+                "title": st_title,
+                "description": st_description,
+                "compliteTarget": st_complite,
+            })
+
+        create_payload["tasks"].append({
+            "title": title,
+            "description": description,
+            "compliteTarget": complite_target,
+            "subtasks": subtasks_out,
+        })
+
+    # Send to updateProject/createProject endpoint
+    create_path = f"{base.rstrip('/')}/api/v1/updateProject/createProject"
+    logger.info(f"Sending full project payload to DB: {json.dumps(create_payload, ensure_ascii=False, indent=2)}")
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.post(create_path, json=project_obj, timeout=10.0)
+            resp = await client.post(create_path, json=create_payload, timeout=10.0)
         if resp.status_code not in (200, 201):
-            logger.warning("CreateFullProject failed: %s %s", resp.status_code, resp.text)
+            logger.warning("CreateProject failed: %s %s", resp.status_code, resp.text)
             return {"created": False, "status": resp.status_code, "detail": resp.text}
     except Exception as e:
         logger.exception("Exception creating project: %s", e)
@@ -606,4 +674,819 @@ async def create_project(payload: ChatPayload):
     # Save dynamic AI confirmation to history
     await _post_history(base, user_id, summary, is_ai=True, chat_type="create")
 
-    return {"response": summary, "created": True, "project": project_obj}
+    return {"response": summary, "created": True, "project": create_payload}
+
+
+# ========================
+# NEW PYDANTIC MODELS
+# ========================
+
+class TaskPayload(BaseModel):
+    userId: str
+    projectId: str
+    text: str
+
+
+class TaskCreatePayload(BaseModel):
+    userId: str
+    projectId: str
+    query: str
+
+
+class SubtaskPayload(BaseModel):
+    userId: str
+    projectId: str
+    taskId: str
+    text: str
+
+
+# ========================
+# HELPER FUNCTIONS
+# ========================
+
+async def _fetch_project_data(base: str, project_id: str) -> dict | None:
+    """Fetch project data from DB: {baseUrl}/api/v1/updateProject/getProject/:projectId"""
+    path = f"{base.rstrip('/')}/api/v1/updateProject/getProject/{project_id}"
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(path, timeout=10.0)
+        if resp.status_code != 200:
+            logger.warning("Failed to fetch project data: %s %s", resp.status_code, resp.text)
+            return None
+        return resp.json()
+    except Exception as e:
+        logger.exception("Exception fetching project data: %s", e)
+        return None
+
+
+async def _fetch_subtask_data(base: str, task_id: str, project_id: str) -> dict | None:
+    """Fetch subtask data from DB: {baseUrl}/api/v1/updateProject/tasks/:taskId/parents/:projectId"""
+    path = f"{base.rstrip('/')}/api/v1/updateProject/tasks/{task_id}/parents/{project_id}"
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(path, timeout=10.0)
+        if resp.status_code != 200:
+            logger.warning("Failed to fetch subtask data: %s %s", resp.status_code, resp.text)
+            return None
+        return resp.json()
+    except Exception as e:
+        logger.exception("Exception fetching subtask data: %s", e)
+        return None
+
+
+async def _fetch_project_chat_history(base: str, user_id: str, project_or_task_id: str, chat_type: str = "ask") -> list:
+    """Fetch chat history from DB: {baseUrl}/api/v1/projectChatHistory/getProjectChat/:userId/:projectOrTaskId/:chatType"""
+    path = f"{base.rstrip('/')}/api/v1/projectChatHistory/getProjectChat/{user_id}/{project_or_task_id}/{chat_type}"
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(path, timeout=10.0)
+        if resp.status_code != 200:
+            logger.warning("Failed to fetch project chat history: %s %s", resp.status_code, resp.text)
+            return []
+        payload = resp.json()
+        # API may wrap under data
+        history = payload.get("data") if isinstance(payload, dict) and payload.get("data") else payload
+        if isinstance(history, dict):
+            return [history]
+        if isinstance(history, list):
+            return history
+        return []
+    except Exception as e:
+        logger.exception("Exception fetching project chat history: %s", e)
+        return []
+
+
+async def _save_to_project_chat_history(base: str, user_id: str, project_or_task_id: str, text: str, is_ai: bool, chat_type: str = "ask") -> bool:
+    """Save message to project chat history: {baseUrl}/api/v1/projectChatHistory/create"""
+    path = f"{base.rstrip('/')}/api/v1/projectChatHistory/create"
+    body = {
+        "userId": user_id,
+        "projectOrTaskId": project_or_task_id,
+        "isAi": bool(is_ai),
+        "chatType": chat_type,
+        "text": text,
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(path, json=body, timeout=10.0)
+        if resp.status_code in (200, 201):
+            return True
+        logger.warning("Failed to save to project chat history: %s %s", resp.status_code, resp.text)
+        return False
+    except Exception as e:
+        logger.exception("Exception saving to project chat history: %s", e)
+        return False
+
+
+async def _detect_creation_intent_with_llm(user_text: str, task_context: str = "") -> dict:
+    """Use LLM to detect if user query is a command for making task, subtask, or general conversation.
+    Returns: {"intent": "task" | "subtask" | "general", "reason": str}"""
+    prompt = f"""Analyze the user's message and determine their intent.
+
+Task Context:
+{task_context if task_context.strip() else "(No specific task context)"}
+
+User Message: "{user_text}"
+
+Respond ONLY with a JSON object (no other text):
+{{
+    "intent": "task" | "subtask" | "general",
+    "reason": "brief explanation"
+}}
+
+Guidelines:
+- "task": User is explicitly asking to create/make/add a new TASK (e.g., "make a new task", "add task", "create task", "I need a new task for this project")
+- "subtask": User is explicitly asking to create/make/add a SUBTASK under current task (e.g., "make subtask", "add subtask", "create subtask under this", "break this into subtasks")
+- "general": User is asking a general question, seeking help, or having a conversation about the task (e.g., "what should I do?", "how do I proceed?", "tell me about this", "help me understand")
+
+Be precise: Only use "task" or "subtask" if it's a clear CREATE/MAKE/ADD command. Otherwise use "general"."""
+
+    try:
+        messages = [{"role": "user", "content": prompt}]
+        result_text = await _call_openrouter(messages, max_tokens=10000, temperature=0.5)
+
+        # Extract JSON from response
+        json_match = re.search(r"\{[\s\S]*\}", result_text)
+        if json_match:
+            intent_data = json.loads(json_match.group(0))
+            return intent_data
+        else:
+            logger.warning("Could not extract JSON from intent detection: %s", result_text)
+            return {"intent": "general", "reason": "Failed to parse LLM response"}
+    except Exception as e:
+        logger.exception("Error in LLM intent detection: %s", e)
+        return {"intent": "general", "reason": f"Error: {str(e)}"}
+
+
+async def _detect_subtask_intent_with_deepseek(user_query: str, subtask_context: str = "", task_context: str = "") -> dict:
+    """
+    Use DeepSeek LLM to detect if user's message is a command for making a subtask or general chat.
+    Returns: {"intent": "create_subtask" | "general_chat", "reason": str}
+    """
+    prompt = f"""Analyze the user's message and determine their intent.
+
+Last subtask conversation message:
+{subtask_context.strip() if subtask_context and subtask_context.strip() else "(No previous subtask message)"}
+
+Previous task conversation (as fallback):
+{task_context.strip() if task_context and task_context.strip() else "(No task message)"}
+
+Current User Query: "{user_query}"
+
+Respond ONLY with a JSON object (no other text):
+{{
+    "intent": "create_subtask" | "general_chat",
+    "reason": "brief explanation"
+}}
+
+Guidelines:
+- "create_subtask": User is explicitly asking to create/make/add a new SUBTASK (e.g., "make a subtask", "add subtask", "create subtask", "I need a subtask", "break this down")
+- "general_chat": User is asking a general question, seeking help, or having a conversation (e.g., "what should I do?", "how do I proceed?", "tell me about this", "help me understand")
+
+Be precise: Only use "create_subtask" if it's a clear CREATE/MAKE/ADD command. Otherwise use "general_chat"."""
+
+    try:
+        messages = [{"role": "user", "content": prompt}]
+        result_text = await _call_openrouter(messages, model="deepseek/deepseek-chat", max_tokens=1000, temperature=0.3)
+
+        # Extract JSON from response
+        json_match = re.search(r"\{[\s\S]*\}", result_text)
+        if json_match:
+            intent_data = json.loads(json_match.group(0))
+            return intent_data
+        else:
+            logger.warning("Could not extract JSON from subtask intent detection: %s", result_text)
+            return {"intent": "general_chat", "reason": "Failed to parse LLM response"}
+    except Exception as e:
+        logger.exception("Error in subtask intent detection: %s", e)
+        return {"intent": "general_chat", "reason": f"Error: {str(e)}"}
+
+
+async def _generate_subtask_from_query(user_query: str, parent_task_data: dict, parent_task_id: str, project_id: str, user_id: str, subtask_context: str = "") -> dict | None:
+    """
+    Use DeepSeek LLM to generate a subtask object from user query.
+    Returns: {"parentTaskId": str, "title": str, "userId": str, "projectId": str, "description": str, "compliteTarget": str} or None on failure
+    """
+    prompt = f"""Based on the parent task information and user query, generate a subtask object.
+
+Parent Task Data:
+{json.dumps(parent_task_data, ensure_ascii=False, indent=2)}
+
+Previous subtask conversation:
+{subtask_context.strip() if subtask_context and subtask_context.strip() else "(No previous subtask context)"}
+
+Current User Query: "{user_query}"
+
+Create a subtask with the following JSON structure. Use the query and task context to fill in meaningful values:
+{{
+    "parentTaskId": "{parent_task_id}",
+    "title": "Short subtask title (max 100 chars)",
+    "userId": "{user_id}",
+    "projectId": "{project_id}",
+    "description": "Detailed description of what needs to be done",
+    "compliteTarget": "YYYY-MM-DD format date for completion deadline"
+}}
+
+IMPORTANT RULES:
+- MUST include all 6 fields exactly as shown above in this exact order
+- MUST use EXACT parentTaskId='{parent_task_id}', userId='{user_id}', projectId='{project_id}' (do NOT change them)
+- title: Concise, action-oriented summary of the subtask based on user query
+- description: Detailed explanation of what the subtask involves
+- compliteTarget: A reasonable completion date in YYYY-MM-DD format (should be before or same as parent task date)
+
+Return ONLY the JSON object with all 6 fields, no other text."""
+
+    try:
+        messages = [{"role": "user", "content": prompt}]
+        result_text = await _call_openrouter(messages, model="deepseek/deepseek-chat", max_tokens=1000, temperature=0.5)
+        
+        logger.info(f"LLM response for subtask generation: {result_text}")
+
+        # Extract JSON from response
+        json_match = re.search(r"\{[\s\S]*\}", result_text)
+        if json_match:
+            subtask_data = json.loads(json_match.group(0))
+            
+            # Ensure all required fields are present with correct values
+            subtask_data["parentTaskId"] = parent_task_id
+            subtask_data["userId"] = user_id
+            subtask_data["projectId"] = project_id
+            
+            # Ensure title exists
+            if "title" not in subtask_data or not subtask_data["title"]:
+                subtask_data["title"] = user_query[:100]
+            
+            # Ensure description exists
+            if "description" not in subtask_data:
+                subtask_data["description"] = ""
+            
+            # Ensure compliteTarget exists and is in YYYY-MM-DD format
+            if "compliteTarget" not in subtask_data or not subtask_data["compliteTarget"]:
+                # Default to tomorrow
+                tomorrow = (datetime.utcnow().date() + timedelta(days=1)).strftime("%Y-%m-%d")
+                subtask_data["compliteTarget"] = tomorrow
+            
+            logger.info(f"Generated subtask object: {json.dumps(subtask_data, ensure_ascii=False, indent=2)}")
+            return subtask_data
+        else:
+            logger.warning("Could not extract JSON from subtask generation: %s", result_text)
+            return None
+    except Exception as e:
+        logger.exception("Error in subtask generation: %s", e)
+        return None
+
+
+async def _push_subtask_to_database(base: str, subtask_data: dict) -> dict | None:
+    """
+    Push subtask to database: POST {baseUrl}/api/v1/updateProject/createSubtaskUnerTaskOrSubtask
+    """
+    path = f"{base.rstrip('/')}/api/v1/updateProject/createSubtaskUnerTaskOrSubtask"
+    
+    logger.info(f"Pushing subtask to database at: {path}")
+    logger.info(f"Subtask payload: {json.dumps(subtask_data, ensure_ascii=False, indent=2)}")
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(path, json=subtask_data, timeout=10.0)
+        
+        logger.info(f"Database response status: {resp.status_code}")
+        logger.info(f"Database response body: {resp.text}")
+        
+        if resp.status_code in (200, 201):
+            return resp.json()
+        
+        logger.warning("Failed to push subtask to database: status=%s, response=%s", resp.status_code, resp.text)
+        return None
+    except Exception as e:
+        logger.exception("Exception pushing subtask to database: %s", e)
+        return None
+
+
+async def _generate_subtask_feedback_response(user_query: str, parent_task_data: dict, subtask_context: str = "") -> str:
+    """
+    Generate a feedback/response message for user query without creating a subtask.
+    Uses LLM to provide helpful response based on task context.
+    Returns: feedback message string
+    """
+    prompt = f"""Provide helpful feedback and response to the user's query based on the task context.
+
+Parent Task Data:
+{json.dumps(parent_task_data, ensure_ascii=False, indent=2)}
+
+Previous subtask conversation:
+{subtask_context.strip() if subtask_context and subtask_context.strip() else "(No previous conversation)"}
+
+Current User Query: "{user_query}"
+
+Provide a helpful, concise response to the user's question or message. Be practical and reference the task context where relevant.
+Do not create a subtask, just provide helpful feedback and guidance based on their question."""
+
+    try:
+        messages = [{"role": "user", "content": prompt}]
+        feedback = await _call_openrouter(messages, model="deepseek/deepseek-chat", max_tokens=1500, temperature=0.7)
+        return feedback.strip()
+    except Exception as e:
+        logger.exception("Error in subtask feedback generation: %s", e)
+        return f"I encountered an error while processing your query: {str(e)}"
+
+
+async def _generate_subtask_creation_response(user_query: str, subtask_data: dict, parent_task_data: dict) -> str:
+    """
+    Generate a friendly response message confirming subtask creation.
+    Uses LLM to provide a helpful confirmation message.
+    Returns: response message string
+    """
+    prompt = f"""The user has just created a new subtask. Generate a friendly, professional response message confirming the subtask creation.
+
+User Query: "{user_query}"
+
+Created Subtask:
+{json.dumps(subtask_data, ensure_ascii=False, indent=2)}
+
+Parent Task Context:
+{json.dumps(parent_task_data, ensure_ascii=False, indent=2)}
+
+Generate a concise, friendly response message that:
+1. Confirms the subtask has been created successfully
+2. Highlights key details about the subtask (title and due date)
+3. Offers brief encouragement or next steps
+Keep it to 2-3 sentences."""
+
+    try:
+        messages = [{"role": "user", "content": prompt}]
+        response = await _call_openrouter(messages, model="deepseek/deepseek-chat", max_tokens=500, temperature=0.7)
+        return response.strip()
+    except Exception as e:
+        logger.exception("Error in subtask creation response generation: %s", e)
+        subtask_title = subtask_data.get("title", "Subtask")
+        return f"Subtask '{subtask_title}' has been created successfully!"
+
+
+# ========================
+# ROUTES
+# ========================
+
+@router.post("/task_ask/")
+async def task_ask_route(payload: TaskPayload):
+    """
+    Ask question about a project.
+    - Fetch project data from DB
+    - Save user message to chat history
+    - Use LLM to answer based on project context
+    - Save AI response to chat history
+    - Store last message in global variable
+    """
+    global last_messege
+    
+    base = os.getenv("PROJECT_SERVICE_URL")
+    if not base:
+        raise HTTPException(status_code=500, detail="PROJECT_SERVICE_URL not configured in environment")
+
+    user_id = payload.userId
+    project_id = payload.projectId
+    user_text = (payload.text or "").strip()
+
+    if not user_id or not project_id or not user_text:
+        raise HTTPException(status_code=400, detail="userId, projectId, and text are required")
+
+    # Store last message in global variable
+    last_messege = {
+        "userId": user_id,
+        "projectId": project_id,
+        "text": user_text,
+    }
+
+    # Save user message to chat history
+    await _save_to_project_chat_history(base, user_id, project_id, user_text, is_ai=False, chat_type="ask")
+
+    # Fetch project data from DB
+    project_data = await _fetch_project_data(base, project_id)
+    if not project_data:
+        raise HTTPException(status_code=500, detail="Failed to fetch project data from database")
+
+    # Build context with project data
+    project_json = json.dumps(project_data, ensure_ascii=False, indent=2)
+    context = (
+        "You are a helpful project assistant. Answer the user's question about the following project. "
+        "Provide concise and practical answers based on the project information.\n\n"
+        f"PROJECT DATA:\n{project_json}\n\n"
+        f"User Question: {user_text}\n\n"
+        "Provide a helpful response."
+    )
+
+    # Call LLM to generate response
+    reply = await generate_text_with_context(context, system_name="Project Assistant")
+
+    # Save AI response to chat history
+    await _save_to_project_chat_history(base, user_id, project_id, reply, is_ai=True, chat_type="ask")
+
+    return {"user_text": user_text, "response": reply}
+
+async def _detect_task_intent_with_deepseek(user_query: str, last_message: str = "") -> dict:
+    """
+    Use DeepSeek LLM to detect if user's message is a command for making a task or general chat.
+    Returns: {"intent": "create_task" | "general_chat", "reason": str}
+    """
+    prompt = f"""Analyze the user's message and determine their intent.
+
+Last conversation message:
+{last_message.strip() if last_message and last_message.strip() else "(No previous message)"}
+
+Current User Query: "{user_query}"
+
+Respond ONLY with a JSON object (no other text):
+{{
+    "intent": "create_task" | "general_chat",
+    "reason": "brief explanation"
+}}
+
+Guidelines:
+- "create_task": User is explicitly asking to create/make/add a new TASK (e.g., "make a new task", "add task", "create task", "I need a new task", "make a task for this")
+- "general_chat": User is asking a general question, seeking help, or having a conversation (e.g., "what should I do?", "how do I proceed?", "tell me about this")
+
+Be precise: Only use "create_task" if it's a clear CREATE/MAKE/ADD command. Otherwise use "general_chat"."""
+
+    try:
+        messages = [{"role": "user", "content": prompt}]
+        result_text = await _call_openrouter(messages, model="deepseek/deepseek-chat", max_tokens=1000, temperature=0.3)
+
+        # Extract JSON from response
+        json_match = re.search(r"\{[\s\S]*\}", result_text)
+        if json_match:
+            intent_data = json.loads(json_match.group(0))
+            return intent_data
+        else:
+            logger.warning("Could not extract JSON from task intent detection: %s", result_text)
+            return {"intent": "general_chat", "reason": "Failed to parse LLM response"}
+    except Exception as e:
+        logger.exception("Error in task intent detection: %s", e)
+        return {"intent": "general_chat", "reason": f"Error: {str(e)}"}
+
+
+async def _generate_task_from_query(user_query: str, project_data: dict, last_message: str = "") -> dict | None:
+    """
+    Use DeepSeek LLM to generate a task object from user query.
+    Returns: {"title": str, "description": str, "compliteTarget": str} or None on failure
+    """
+    prompt = f"""Based on the project information and user query, generate a task object.
+
+Project Data:
+{json.dumps(project_data, ensure_ascii=False, indent=2)}
+
+Last conversation message:
+{last_message.strip() if last_message and last_message.strip() else "(No previous message)"}
+
+Current User Query: "{user_query}"
+
+Create a task with the following JSON structure. Use the query and project context to fill in meaningful values:
+{{
+    "title": "Short task title (max 100 chars)",
+    "description": "Detailed description of what needs to be done",
+    "compliteTarget": "ISO 8601 datetime string for completion deadline (e.g., '2024-12-31T23:59:59Z')"
+}}
+
+Guidelines:
+- title: Concise, action-oriented summary of the task
+- description: Detailed explanation of what the task involves, based on the project context
+- compliteTarget: A reasonable completion date (e.g., 1-4 weeks from now, adjust based on task complexity)
+
+Return ONLY the JSON object, no other text."""
+
+    try:
+        messages = [{"role": "user", "content": prompt}]
+        result_text = await _call_openrouter(messages, model="deepseek/deepseek-chat", max_tokens=1000, temperature=0.5)
+
+        # Extract JSON from response
+        json_match = re.search(r"\{[\s\S]*\}", result_text)
+        if json_match:
+            task_data = json.loads(json_match.group(0))
+            return task_data
+        else:
+            logger.warning("Could not extract JSON from task generation: %s", result_text)
+            return None
+    except Exception as e:
+        logger.exception("Error in task generation: %s", e)
+        return None
+
+
+async def _push_task_to_database(base: str, project_id: str, user_id: str, task_data: dict) -> dict | None:
+    """
+    Push task to database: POST {baseUrl}/api/v1/updateProject/:projectId/tasks
+    """
+    path = f"{base.rstrip('/')}/api/v1/updateProject/{project_id}/tasks"
+    body = {
+        "userId": user_id,
+        "title": task_data.get("title", "Untitled Task"),
+        "description": task_data.get("description", ""),
+        "compliteTarget": task_data.get("compliteTarget", ""),
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(path, json=body, timeout=10.0)
+        if resp.status_code in (200, 201):
+            return resp.json()
+        logger.warning("Failed to push task to database: %s %s", resp.status_code, resp.text)
+        return None
+    except Exception as e:
+        logger.exception("Exception pushing task to database: %s", e)
+        return None
+
+
+async def _generate_feedback_response(user_query: str, project_data: dict, last_message: str = "") -> str:
+    """
+    Generate a feedback/response message for user query without creating a task.
+    Uses LLM to provide helpful response based on project context.
+    Returns: feedback message string
+    """
+    prompt = f"""Provide helpful feedback and response to the user's query based on the project context.
+
+Project Data:
+{json.dumps(project_data, ensure_ascii=False, indent=2)}
+
+Last conversation message:
+{last_message.strip() if last_message and last_message.strip() else "(No previous message)"}
+
+Current User Query: "{user_query}"
+
+Provide a helpful, concise response to the user's question or message. Be practical and reference the project context where relevant.
+Do not create a task, just provide helpful feedback and guidance based on their question."""
+
+    try:
+        messages = [{"role": "user", "content": prompt}]
+        feedback = await _call_openrouter(messages, model="deepseek/deepseek-chat", max_tokens=1500, temperature=0.7)
+        return feedback.strip()
+    except Exception as e:
+        logger.exception("Error in feedback generation: %s", e)
+        return f"I encountered an error while processing your query: {str(e)}"
+
+
+async def _generate_task_creation_response(user_query: str, task_data: dict, project_data: dict) -> str:
+    """
+    Generate a friendly response message confirming task creation.
+    Uses LLM to provide a helpful confirmation message.
+    Returns: response message string
+    """
+    prompt = f"""The user has just created a new task. Generate a friendly, professional response message confirming the task creation.
+
+User Query: "{user_query}"
+
+Created Task:
+{json.dumps(task_data, ensure_ascii=False, indent=2)}
+
+Project Context:
+{json.dumps(project_data, ensure_ascii=False, indent=2)}
+
+Generate a concise, friendly response message that:
+1. Confirms the task has been created successfully
+2. Highlights key details about the task (title and due date)
+3. Offers brief encouragement or next steps
+Keep it to 2-3 sentences."""
+
+    try:
+        messages = [{"role": "user", "content": prompt}]
+        response = await _call_openrouter(messages, model="deepseek/deepseek-chat", max_tokens=500, temperature=0.7)
+        return response.strip()
+    except Exception as e:
+        logger.exception("Error in task creation response generation: %s", e)
+        task_title = task_data.get("title", "Task")
+        return f"Task '{task_title}' has been created successfully!"
+
+
+@router.post("/task_create/")
+async def task_create_route(payload: TaskCreatePayload):
+    """
+    Create a task or provide feedback based on user query intent.
+    - Get userId, projectId & user query from request
+    - Fetch project data from DB
+    - Get conversation from last_messege variable from task_ask route
+    - Detect intent using DeepSeek LLM (general chat vs command for making task)
+    - If intent is "create_task": generate task object, push to database, and provide response
+    - If intent is "general_chat": provide feedback response instead of creating task
+    """
+    global last_messege
+    
+    base = os.getenv("PROJECT_SERVICE_URL")
+    if not base:
+        raise HTTPException(status_code=500, detail="PROJECT_SERVICE_URL not configured in environment")
+
+    user_id = payload.userId
+    project_id = payload.projectId
+    user_query = (payload.query or "").strip()
+
+    if not user_id or not project_id or not user_query:
+        raise HTTPException(status_code=400, detail="userId, projectId, and query are required")
+
+    # Fetch project data from DB
+    project_data = await _fetch_project_data(base, project_id)
+    if not project_data:
+        raise HTTPException(status_code=500, detail="Failed to fetch project data from database. Check if projectId is valid or not.")
+
+    # Get last message from task_ask route (handle empty case)
+    last_message_text = last_messege.get("text") if last_messege else ""
+    if not last_message_text:
+        last_message_text = ""  # Ensure it's a string, not None
+
+    # Detect intent using DeepSeek LLM
+    intent_result = await _detect_task_intent_with_deepseek(user_query, last_message_text)
+    intent = intent_result.get("intent", "general_chat")
+    reason = intent_result.get("reason", "")
+
+    logger.info(f"Task intent detection - Intent: {intent}, Reason: {reason}")
+
+    # If intent is general_chat, provide feedback instead of creating task
+    if intent == "general_chat":
+        logger.info("User intent is general chat, generating feedback response")
+        feedback = await _generate_feedback_response(user_query, project_data, last_message_text)
+        return {
+            "success": True,
+            "intent": intent,
+            "reason": reason,
+            "task_created": False,
+            "response": feedback,
+        }
+
+    # If intent is to create task, proceed with task creation
+    logger.info("User intent is to create task, generating task object")
+    
+    # Use user query for task creation
+    task_creation_query = user_query
+
+    # Generate task object using LLM
+    task_data = await _generate_task_from_query(task_creation_query, project_data, last_message_text)
+    if not task_data:
+        raise HTTPException(status_code=500, detail="Failed to generate task from query")
+
+    # Push task to database
+    response = await _push_task_to_database(base, project_id, user_id, task_data)
+    if not response:
+        raise HTTPException(status_code=500, detail="Failed to push task to database")
+
+    # Generate a friendly response message for task creation
+    task_response = await _generate_task_creation_response(user_query, task_data, project_data)
+
+    return {
+        "success": True,
+        "intent": intent,
+        "reason": reason,
+        "task_created": True,
+        "response": task_response,
+        "task": task_data,
+        "database_response": response,
+    }
+
+
+
+
+
+@router.post("/subtask_ask/")
+async def subtask_ask_route(payload: SubtaskPayload):
+    """
+    Ask question about a subtask/task.
+    - Fetch task/subtask data from DB
+    - Save user message to chat history
+    - Use LLM to answer based on task context
+    - Save AI response to chat history
+    - Store last message in global variable
+    """
+    global last_messege_subtask
+    
+    base = os.getenv("PROJECT_SERVICE_URL")
+    if not base:
+        raise HTTPException(status_code=500, detail="PROJECT_SERVICE_URL not configured in environment")
+
+    user_id = payload.userId
+    project_id = payload.projectId
+    task_id = payload.taskId
+    user_text = (payload.text or "").strip()
+
+    if not user_id or not project_id or not task_id or not user_text:
+        raise HTTPException(status_code=400, detail="userId, projectId, taskId, and text are required")
+
+    # Store last message in global variable for subtask_create route
+    last_messege_subtask = {
+        "userId": user_id,
+        "projectId": project_id,
+        "taskId": task_id,
+        "text": user_text,
+    }
+
+    # Save user message to chat history (using taskId as the projectOrTaskId)
+    await _save_to_project_chat_history(base, user_id, task_id, user_text, is_ai=False, chat_type="ask")
+
+    # Fetch task/subtask data from DB
+    task_data = await _fetch_subtask_data(base, task_id, project_id)
+    if not task_data:
+        raise HTTPException(status_code=500, detail="Failed to fetch subtask data from database")
+
+    # Build context with task data
+    task_json = json.dumps(task_data, ensure_ascii=False, indent=2)
+    context = (
+        "You are a helpful task assistant. Answer the user's question about the following task/subtask. "
+        "Provide concise and practical answers based on the task information.\n\n"
+        f"TASK DATA:\n{task_json}\n\n"
+        f"User Question: {user_text}\n\n"
+        "Provide a helpful response."
+    )
+
+    # Call LLM to generate response
+    reply = await generate_text_with_context(context, system_name="Task Assistant")
+
+    # Save AI response to chat history (using taskId as the projectOrTaskId)
+    await _save_to_project_chat_history(base, user_id, task_id, reply, is_ai=True, chat_type="ask")
+
+    return {"user_text": user_text, "response": reply}
+
+
+class SubtaskCreatePayload(BaseModel):
+    userId: str
+    projectId: str
+    parentTaskId: str
+    query: str
+
+
+@router.post("/subtask_create/")
+async def subtask_create_route(payload: SubtaskCreatePayload):
+    """
+    Create a subtask or provide feedback based on user query intent.
+    - Get userId, projectId, parentTaskId & user query from request
+    - Fetch parent task data from DB
+    - Get conversation from last_messege_subtask variable
+    - Detect intent using DeepSeek LLM (general chat vs command for making subtask)
+    - If intent is "create_subtask": generate subtask object, push to database, and provide response
+    - If intent is "general_chat": provide feedback response instead of creating subtask
+    - Always provide a response message to the user
+    """
+    global last_messege_subtask, last_messege
+    
+    base = os.getenv("PROJECT_SERVICE_URL")
+    if not base:
+        raise HTTPException(status_code=500, detail="PROJECT_SERVICE_URL not configured in environment")
+
+    user_id = payload.userId
+    project_id = payload.projectId
+    parent_task_id = payload.parentTaskId
+    user_query = (payload.query or "").strip()
+
+    if not user_id or not project_id or not parent_task_id or not user_query:
+        raise HTTPException(status_code=400, detail="userId, projectId, parentTaskId, and query are required")
+
+    # Fetch parent task data from DB
+    parent_task_data = await _fetch_subtask_data(base, parent_task_id, project_id)
+    if not parent_task_data:
+        raise HTTPException(status_code=500, detail="Failed to fetch parent task data from database. Check if parentTaskId is valid or not.")
+
+    # Get last message from subtask_ask route (handle empty case)
+    last_subtask_message_text = last_messege_subtask.get("text") if last_messege_subtask else ""
+    if not last_subtask_message_text:
+        last_subtask_message_text = ""  # Ensure it's a string, not None
+
+    # Get last message from task_ask route as fallback (handle empty case)
+    last_task_message_text = last_messege.get("text") if last_messege else ""
+    if not last_task_message_text:
+        last_task_message_text = ""  # Ensure it's a string, not None
+
+    # Detect intent using DeepSeek LLM
+    intent_result = await _detect_subtask_intent_with_deepseek(user_query, last_subtask_message_text, last_task_message_text)
+    intent = intent_result.get("intent", "general_chat")
+    reason = intent_result.get("reason", "")
+
+    logger.info(f"Subtask intent detection - Intent: {intent}, Reason: {reason}")
+
+    # If intent is general_chat, provide feedback instead of creating subtask
+    if intent == "general_chat":
+        logger.info("User intent is general chat, generating feedback response")
+        feedback = await _generate_subtask_feedback_response(user_query, parent_task_data, last_subtask_message_text)
+        return {
+            "success": True,
+            "intent": intent,
+            "reason": reason,
+            "subtask_created": False,
+            "response": feedback,
+        }
+
+    # If intent is to create subtask, proceed with subtask creation
+    logger.info("User intent is to create subtask, generating subtask object")
+
+    # Generate subtask object using LLM
+    subtask_data = await _generate_subtask_from_query(user_query, parent_task_data, parent_task_id, project_id, user_id, last_subtask_message_text)
+    if not subtask_data:
+        raise HTTPException(status_code=500, detail="Failed to generate subtask from query")
+
+    # Push subtask to database
+    db_response = await _push_subtask_to_database(base, subtask_data)
+    if not db_response:
+        raise HTTPException(status_code=500, detail="Failed to push subtask to database")
+
+    # Generate a friendly response message for subtask creation
+    subtask_response = await _generate_subtask_creation_response(user_query, subtask_data, parent_task_data)
+
+    return {
+        "success": True,
+        "intent": intent,
+        "reason": reason,
+        "subtask_created": True,
+        "response": subtask_response,
+        "subtask": subtask_data,
+        "database_response": db_response,
+    }
+
