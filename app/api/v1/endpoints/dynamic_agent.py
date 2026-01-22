@@ -1286,6 +1286,9 @@ async def task_create_route(payload: TaskCreatePayload):
     if not last_message_text:
         last_message_text = ""  # Ensure it's a string, not None
 
+    # Save user query to chat history
+    await _save_to_project_chat_history(base, user_id, project_id, user_query, is_ai=False, chat_type="create")
+
     # Detect intent using DeepSeek LLM
     intent_result = await _detect_task_intent_with_deepseek(user_query, last_message_text)
     intent = intent_result.get("intent", "general_chat")
@@ -1297,6 +1300,10 @@ async def task_create_route(payload: TaskCreatePayload):
     if intent == "general_chat":
         logger.info("User intent is general chat, generating feedback response")
         feedback = await _generate_feedback_response(user_query, project_data, last_message_text)
+        
+        # Save AI feedback response to chat history
+        await _save_to_project_chat_history(base, user_id, project_id, feedback, is_ai=True, chat_type="create")
+        
         return {
             "success": True,
             "intent": intent,
@@ -1323,6 +1330,9 @@ async def task_create_route(payload: TaskCreatePayload):
 
     # Generate a friendly response message for task creation
     task_response = await _generate_task_creation_response(user_query, task_data, project_data)
+
+    # Save AI response to chat history
+    await _save_to_project_chat_history(base, user_id, project_id, task_response, is_ai=True, chat_type="create")
 
     return {
         "success": True,
@@ -1435,6 +1445,9 @@ async def subtask_create_route(payload: SubtaskCreatePayload):
     if not parent_task_data:
         raise HTTPException(status_code=500, detail="Failed to fetch parent task data from database. Check if parentTaskId is valid or not.")
 
+    # Save user query to chat history
+    await _save_to_project_chat_history(base, user_id, parent_task_id, user_query, is_ai=False, chat_type="create")
+
     # Get last message from subtask_ask route (handle empty case)
     last_subtask_message_text = last_messege_subtask.get("text") if last_messege_subtask else ""
     if not last_subtask_message_text:
@@ -1456,6 +1469,10 @@ async def subtask_create_route(payload: SubtaskCreatePayload):
     if intent == "general_chat":
         logger.info("User intent is general chat, generating feedback response")
         feedback = await _generate_subtask_feedback_response(user_query, parent_task_data, last_subtask_message_text)
+        
+        # Save AI feedback response to chat history
+        await _save_to_project_chat_history(base, user_id, parent_task_id, feedback, is_ai=True, chat_type="create")
+        
         return {
             "success": True,
             "intent": intent,
@@ -1479,6 +1496,9 @@ async def subtask_create_route(payload: SubtaskCreatePayload):
 
     # Generate a friendly response message for subtask creation
     subtask_response = await _generate_subtask_creation_response(user_query, subtask_data, parent_task_data)
+
+    # Save AI response to chat history
+    await _save_to_project_chat_history(base, user_id, parent_task_id, subtask_response, is_ai=True, chat_type="create")
 
     return {
         "success": True,
