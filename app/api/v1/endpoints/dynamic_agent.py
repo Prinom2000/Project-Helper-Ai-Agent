@@ -422,13 +422,169 @@ async def ask_helper(payload: ChatPayload):
     return {"response": reply}
 
 
+async def _detect_project_creation_intent_with_deepseek(user_query: str, ask_helper_history: str = "") -> dict:
+    """
+    Use DeepSeek LLM to detect the project creation intent with 3 options:
+    - "create_from_history": User wants to create project using ask_helper history (generic command like "make", "create")
+    - "create_from_message": User wants to create project based on topic in their message
+    - "general_chat": User is asking a general question or not asking to create
+    
+    Returns: {"intent": "create_from_history" | "create_from_message" | "general_chat", "reason": str}
+    """
+    prompt = f"""Analyze the user's message and ask history, then determine their intent for project creation.
+
+Ask Helper Chat History (previous conversation):
+{ask_helper_history.strip() if ask_helper_history and ask_helper_history.strip() else "(No previous history)"}
+
+Current User Query: "{user_query}"
+
+Respond ONLY with a JSON object (no other text):
+{{
+    "intent": "create_from_history" | "create_from_message" | "general_chat",
+    "reason": "brief explanation"
+}}
+
+Guidelines:
+- "create_from_history": User is asking to create/make/build a project but WITHOUT specifying what kind of project (e.g., "make a project", "create", "build", "make the project"). They should use the project topic from the ask history above.
+- "create_from_message": User is asking to create/make a project AND they explicitly mention what kind of project in their message (e.g., "create a project for learning C++", "make an e-commerce website project", "build a mobile app").
+- "general_chat": User is asking a general question, seeking help, or having a conversation WITHOUT asking to create a project (e.g., "what should I do?", "how do I proceed?", "tell me about this", "help me understand").
+
+Be precise in your analysis:
+- If user says generic create command with NO topic mentioned → "create_from_history"
+- If user says create command WITH a specific topic → "create_from_message"
+- If user is NOT asking to create → "general_chat"
+"""
+
+    try:
+        messages = [{"role": "user", "content": prompt}]
+        result_text = await _call_openrouter(messages, model="deepseek/deepseek-chat", max_tokens=1000, temperature=0.3)
+
+        # Extract JSON from response
+        json_match = re.search(r"\{[\s\S]*\}", result_text)
+        if json_match:
+            intent_data = json.loads(json_match.group(0))
+            return intent_data
+        else:
+            logger.warning("Could not extract JSON from project creation intent detection: %s", result_text)
+            return {"intent": "general_chat", "reason": "Failed to parse LLM response"}
+    except Exception as e:
+        logger.exception("Error in project creation intent detection: %s", e)
+        return {"intent": "general_chat", "reason": f"Error: {str(e)}"}
+
+
+def _extract_project_id_from_db_response(db_response: dict) -> str | None:
+    """
+    Extract and validate the project _id from DB response JSON.
+    Checks all key-value pairs in the response and nested objects.
+    
+    Expected structure:
+    {
+        "success": true,
+        "message": "...",
+        "project": {
+            "_id": "...",
+            "userId": "...",
+            "goal": "...",
+            ...
+        }
+    }
+    
+    Returns: The _id value if found, None otherwise
+    """
+    if not db_response or not isinstance(db_response, dict):
+        logger.warning("DB response is not a valid dict: %s", db_response)
+        return None
+    
+    # Log all top-level keys and values for debugging
+    logger.info(f"DB Response top-level keys: {list(db_response.keys())}")
+    for key, value in db_response.items():
+        if isinstance(value, dict):
+            logger.info(f"  {key}: [dict with keys: {list(value.keys())}]")
+        elif isinstance(value, list):
+            logger.info(f"  {key}: [list with {len(value)} items]")
+        else:
+            logger.info(f"  {key}: {value}")
+    
+    # Strategy 1: Try to get _id from nested project object
+    if "project" in db_response and isinstance(db_response["project"], dict):
+        project_obj = db_response["project"]
+        logger.info(f"Found 'project' object with keys: {list(project_obj.keys())}")
+        
+        # Log all project key-value pairs
+        for key, value in project_obj.items():
+            if isinstance(value, list):
+                logger.info(f"  project.{key}: [list with {len(value)} items]")
+            else:
+                logger.info(f"  project.{key}: {value}")
+        
+        if "_id" in project_obj:
+            project_id = project_obj.get("_id")
+            logger.info(f"Successfully extracted project _id from nested project object: {project_id}")
+            return project_id
+    
+    # Strategy 2: Try to get _id directly from top-level response
+    if "_id" in db_response:
+        project_id = db_response.get("_id")
+        logger.info(f"Successfully extracted project _id from top-level response: {project_id}")
+        return project_id
+    
+    # Strategy 3: Try alternative ID fields
+    alternative_id_fields = ["id", "projectId", "project_id"]
+    for field in alternative_id_fields:
+        if field in db_response:
+            project_id = db_response.get(field)
+            logger.info(f"Successfully extracted project ID using alternative field '{field}': {project_id}")
+            return project_id
+    
+    # Strategy 4: Check inside project object for alternative ID fields
+    if "project" in db_response and isinstance(db_response["project"], dict):
+        project_obj = db_response["project"]
+        for field in alternative_id_fields:
+            if field in project_obj:
+                project_id = project_obj.get(field)
+                logger.info(f"Successfully extracted project ID from project object using alternative field '{field}': {project_id}")
+                return project_id
+    
+    logger.error("Could not extract project _id from DB response. Available top-level keys: %s", list(db_response.keys()))
+    return None
+
+
+async def _generate_project_feedback_response(user_query: str, last_message: str = "") -> str:
+    """
+    Generate a feedback/response message for user query without creating a project.
+    Uses LLM to provide helpful response based on conversation context.
+    Returns: feedback message string
+    """
+    prompt = f"""Provide helpful feedback and response to the user's query about project creation.
+
+Last conversation message:
+{last_message.strip() if last_message and last_message.strip() else "(No previous message)"}
+
+Current User Query: "{user_query}"
+
+Provide a helpful, concise response to the user's question or message. Be encouraging and helpful.
+Do not create a project, just provide helpful feedback and guidance based on their question."""
+
+    try:
+        messages = [{"role": "user", "content": prompt}]
+        feedback = await _call_openrouter(messages, model="deepseek/deepseek-chat", max_tokens=1500, temperature=0.7)
+        return feedback.strip()
+    except Exception as e:
+        logger.exception("Error in project feedback generation: %s", e)
+        return f"I encountered an error while processing your query: {str(e)}"
+
+
 @router.post("/create_project/")
 async def create_project(payload: ChatPayload):
     """
     Create a full project JSON from ask history or explicit user request.
-    - If user specifies a topic (e.g., "I want to learn C++"), create project for that topic.
-    - If user says something generic (e.g., "now make the project"), use ask_helper history.
+    - Get conversation from last_messege variable from ask_helper route
+    - Detect intent using DeepSeek LLM (general chat vs command for making project)
+    - If intent is "create_project": generate project based on topic or history, push to database
+    - If intent is "general_chat": provide feedback response instead of creating project
     """
+    global last_messege
+    
     base = os.getenv("PROJECT_SERVICE_URL")
     if not base:
         raise HTTPException(status_code=500, detail="PROJECT_SERVICE_URL not configured in environment")
@@ -459,13 +615,60 @@ async def create_project(payload: ChatPayload):
     # For intent detection, use both current user text and latest context
     aggregated = latest_message if latest_message else user_text
 
-    # Use LLM to detect if user has a specific topic/intent
-    intent_result = await detect_project_intent_with_llm(user_text, aggregated)
-    has_specific_topic = intent_result.get("has_specific_topic", False)
-    topic = intent_result.get("topic")
-    num_tasks = intent_result.get("num_tasks")
+    # Get last message from ask_helper route (handle empty case)
+    last_message_text = last_messege.get("text") if last_messege else ""
+    if not last_message_text:
+        last_message_text = ""  # Ensure it's a string, not None
+
+    # Detect intent using DeepSeek LLM (3-way: create_from_history vs create_from_message vs general_chat)
+    intent_result = await _detect_project_creation_intent_with_deepseek(user_text, aggregated)
+    creation_intent = intent_result.get("intent", "general_chat")
+    intent_reason = intent_result.get("reason", "")
+
+    logger.info(f"Project creation intent detection for user {user_id}: intent={creation_intent}, reason={intent_reason}")
+
+    # If intent is general_chat, provide feedback instead of creating project
+    if creation_intent == "general_chat":
+        logger.info("User intent is general chat, generating feedback response")
+        feedback = await _generate_project_feedback_response(user_text, last_message_text)
+        
+        # Save AI feedback response to history
+        await _post_history(base, user_id, feedback, is_ai=True, chat_type="create")
+        
+        return {
+            "success": True,
+            "intent": creation_intent,
+            "reason": intent_reason,
+            "created": False,
+            "response": feedback,
+        }
+
+    # If intent is create_from_history or create_from_message, proceed with project creation
+    logger.info(f"User intent is to create project - {creation_intent}")
+
+    # Determine which context to use based on intent
+    has_specific_topic = False
+    topic = None
+    num_tasks = None
+
+    if creation_intent == "create_from_message":
+        # User mentioned a specific topic in their message - extract from user_text
+        logger.info("Extracting topic from user message")
+        topic_intent_result = await detect_project_intent_with_llm(user_text, user_text)
+        has_specific_topic = topic_intent_result.get("has_specific_topic", False)
+        topic = topic_intent_result.get("topic")
+        num_tasks = topic_intent_result.get("num_tasks")
+        logger.info(f"Topic from user message: has_specific_topic={has_specific_topic}, topic={topic}, num_tasks={num_tasks}")
     
-    logger.info(f"Intent detection for user {user_id}: has_specific_topic={has_specific_topic}, topic={topic}, num_tasks={num_tasks}")
+    elif creation_intent == "create_from_history":
+        # User said generic create command - extract topic from ask_helper history
+        logger.info("Extracting topic from ask_helper history")
+        if aggregated.strip() and aggregated != user_text:
+            history_topic_result = await detect_project_intent_with_llm(aggregated, aggregated)
+            has_specific_topic = history_topic_result.get("has_specific_topic", False)
+            topic = history_topic_result.get("topic")
+            num_tasks = history_topic_result.get("num_tasks")
+            logger.info(f"Topic from history: has_specific_topic={has_specific_topic}, topic={topic}, num_tasks={num_tasks}")
 
     # Determine which context to use
     if has_specific_topic and topic:
@@ -620,12 +823,44 @@ async def create_project(payload: ChatPayload):
     # Send to updateProject/createProject endpoint
     create_path = f"{base.rstrip('/')}/api/v1/updateProject/createProject"
     logger.info(f"Sending full project payload to DB: {json.dumps(create_payload, ensure_ascii=False, indent=2)}")
+    project_id = None
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(create_path, json=create_payload, timeout=10.0)
         if resp.status_code not in (200, 201):
             logger.warning("CreateProject failed: %s %s", resp.status_code, resp.text)
             return {"created": False, "status": resp.status_code, "detail": resp.text}
+        
+        # Extract project ID from DB response using the utility function
+        db_response = resp.json()
+        project_id = _extract_project_id_from_db_response(db_response)
+        
+        # if not project_id:
+        #     logger.error("Failed to extract project ID from DB response: %s", json.dumps(db_response, ensure_ascii=False))
+        #     return {"created": False, "status": 500, "detail": "Failed to extract project ID from database response"}
+        
+        # logger.info(f"Project created with ID: {project_id}")
+        
+        # Push project ID to global/push endpoint
+        if project_id:
+            print(f"Pushing project ID {project_id} to global endpoint")
+            global_push_path = f"{base.rstrip('/')}/api/v1/global/global/push"
+            global_push_payload = {
+                "userId": user_id,
+                "action": project_id,
+            }
+            logger.info(f"Pushing project to global endpoint: {global_push_path} with payload: {json.dumps(global_push_payload, ensure_ascii=False)}")
+            try:
+                async with httpx.AsyncClient() as client:
+                    push_resp = await client.patch(global_push_path, json=global_push_payload, timeout=100.0)
+                if push_resp.status_code in (200, 201):
+                    logger.info(f"Project pushed to global endpoint successfully")
+                else:
+                    logger.warning(f"Failed to push project to global endpoint: {push_resp.status_code} {push_resp.text}")
+            except Exception as e:
+                logger.exception(f"Exception pushing project to global endpoint: {e}")
+        else:
+            logger.warning("Could not extract project ID from DB response")
     except Exception as e:
         logger.exception("Exception creating project: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -674,7 +909,7 @@ async def create_project(payload: ChatPayload):
     # Save dynamic AI confirmation to history
     await _post_history(base, user_id, summary, is_ai=True, chat_type="create")
 
-    return {"response": summary, "created": True, "project": create_payload}
+    return {"response": summary, "created": True, "project": create_payload, "DB_response": db_response, "projectId": project_id}
 
 
 # ========================
@@ -1328,6 +1563,34 @@ async def task_create_route(payload: TaskCreatePayload):
     if not response:
         raise HTTPException(status_code=500, detail="Failed to push task to database")
 
+    # Extract task ID from DB response and push to undo endpoint
+    # Check nested task object first, then fallback to top-level
+    task_id = None
+    if isinstance(response, dict) and "task" in response and isinstance(response["task"], dict):
+        task_id = response["task"].get("_id")
+        print(f"Extracted task ID from nested task object: {task_id}")
+    if not task_id:
+        task_id = response.get("_id") or response.get("id") or response.get("taskId")
+    if task_id:
+        undo_path = f"{base.rstrip('/')}/api/v1/undo/push"
+        undo_payload = {
+            "userId": user_id,
+            "taskOrProjectId": project_id,
+            "action": task_id,
+        }
+        logger.info(f"Pushing undo entry for task to {undo_path} with payload: {json.dumps(undo_payload, ensure_ascii=False)}")
+        try:
+            async with httpx.AsyncClient() as client:
+                undo_resp = await client.patch(undo_path, json=undo_payload, timeout=100.0)
+            if undo_resp.status_code in (200, 201):
+                logger.info(f"Undo entry for task created successfully")
+            else:
+                logger.warning(f"Failed to create undo entry for task: {undo_resp.status_code} {undo_resp.text}")
+        except Exception as e:
+            logger.exception(f"Exception pushing undo entry for task: {e}")
+    else:
+        logger.warning("Could not extract task ID from DB response")
+
     # Generate a friendly response message for task creation
     task_response = await _generate_task_creation_response(user_query, task_data, project_data)
 
@@ -1493,6 +1756,33 @@ async def subtask_create_route(payload: SubtaskCreatePayload):
     db_response = await _push_subtask_to_database(base, subtask_data)
     if not db_response:
         raise HTTPException(status_code=500, detail="Failed to push subtask to database")
+
+    # Extract subtask ID from DB response and push to undo endpoint
+    # Check nested task object first, then fallback to top-level
+    subtask_id = None
+    if isinstance(db_response, dict) and "task" in db_response and isinstance(db_response["task"], dict):
+        subtask_id = db_response["task"].get("_id")
+    if not subtask_id:
+        subtask_id = db_response.get("_id") or db_response.get("id") or db_response.get("subtaskId")
+    if subtask_id:
+        undo_path = f"{base.rstrip('/')}/api/v1/undo/push"
+        undo_payload = {
+            "userId": user_id,
+            "taskOrProjectId": parent_task_id,
+            "action": subtask_id,
+        }
+        logger.info(f"Pushing undo entry for subtask to {undo_path} with payload: {json.dumps(undo_payload, ensure_ascii=False)}")
+        try:
+            async with httpx.AsyncClient() as client:
+                undo_resp = await client.patch(undo_path, json=undo_payload, timeout=100.0)
+            if undo_resp.status_code in (200, 201):
+                logger.info(f"Undo entry for subtask created successfully")
+            else:
+                logger.warning(f"Failed to create undo entry for subtask: {undo_resp.status_code} {undo_resp.text}")
+        except Exception as e:
+            logger.exception(f"Exception pushing undo entry for subtask: {e}")
+    else:
+        logger.warning("Could not extract subtask ID from DB response")
 
     # Generate a friendly response message for subtask creation
     subtask_response = await _generate_subtask_creation_response(user_query, subtask_data, parent_task_data)
